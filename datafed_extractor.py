@@ -111,54 +111,54 @@ def get_meta(flat, datafed_id):
 df_api = API()
 df_api.loginByPassword("cnp68","Chirayu#2099patel")
 
-df_api.setContext('p/2022_materials_project')
+df_api.setContext('p/2023_symmetry_dataset_single_record')
 
-coll_list_resp = df_api.collectionItemsList('c/409258621', count=10)
-
+coll_list_resp = df_api.collectionItemsList('c/463416128', count=10000)
+# print(f"coll_list_resp:{coll_list_resp}")
 # Ensure the directory exists
 output_dir = r"static/datafed_dump"
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
 for idx, each in enumerate(coll_list_resp[0].item):
-    print(f"Processing item {idx}")
+    print(f"Processing item {each.id}")
 
-    dv_resp = df_api.dataGet(each.id,"b88d4288-6b01-11ef-b754-0f922496edc5")
-    print(f'dv_resp: {dv_resp}')
+    dv_resp = df_api.dataGet(each.id,"508555c2-96ee-11ef-94df-afe3639840c7/home/gridftp/data/globus-data/2")
+    print(f'dv_resp: {idx}')
     # Check if 'metadata' exists and if it's not empty
-    if dv_resp and dv_resp[0].data and dv_resp[0].data[0].metadata:
-        metadata_str = dv_resp[0].data[0].metadata
-        try:
-            res = json.loads(metadata_str)
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON for item {each.id}: {e}")
-            continue  # Skip to the next item if JSON is invalid
-
-        # Safely access 'formula_pretty' and 'symmetry' fields using .get()
-        formula_pretty = res.get('formula_pretty', 'unknown')
-        symmetry = res.get('symmetry', {})
-        crystal_system = symmetry.get('crystal_system', 'unknown')
-        symbol = symmetry.get('symbol', 'unknown')
-
-        # Handle the case when all fields are "unknown"
-        if formula_pretty == 'unknown' and crystal_system == 'unknown' and symbol == 'unknown':
-            print(f"Skipping item {each.id} due to missing key fields.")
-            continue
-
-        # Create the filename from the metadata
-        file_name = f"{each.id}_{formula_pretty}_{crystal_system}_{symbol}.json"
-        file_name = file_name.replace("/", "_")
-        string_index = file_name.find("_", 2)
-        output_file_name = file_name[string_index + 1:]
-        datafed_id = file_name[:string_index].replace("_", "/")
-
-        output = generate_sibling_context(res)
-        sibling_cache = get_sibling_cache_from_context(output)
-        flat = flatten(res)
-        prepared_list = get_meta(flat, datafed_id)
-
-        file_path = os.path.join(output_dir, output_file_name)
-        with open(file_path, "w") as outfile:
-            json.dump(prepared_list, outfile)
-    else:
-        print(f"Metadata missing or empty for item {each.id}")
+    # if dv_resp and dv_resp[0].data and dv_resp[0].data[0].metadata:
+    #     metadata_str = dv_resp[0].data[0].metadata
+    #     try:
+    #         res = json.loads(metadata_str)
+    #     except json.JSONDecodeError as e:
+    #         print(f"Error decoding JSON for item {each.id}: {e}")
+    #         continue  # Skip to the next item if JSON is invalid
+    #
+    #     # Safely access 'formula_pretty' and 'symmetry' fields using .get()
+    #     formula_pretty = res.get('formula_pretty', 'unknown')
+    #     symmetry = res.get('symmetry', {})
+    #     crystal_system = symmetry.get('crystal_system', 'unknown')
+    #     symbol = symmetry.get('symbol', 'unknown')
+    #
+    #     # Handle the case when all fields are "unknown"
+    #     if formula_pretty == 'unknown' and crystal_system == 'unknown' and symbol == 'unknown':
+    #         print(f"Skipping item {each.id} due to missing key fields.")
+    #         continue
+    #
+    #     # Create the filename from the metadata
+    #     file_name = f"{each.id}_{formula_pretty}_{crystal_system}_{symbol}.json"
+    #     file_name = file_name.replace("/", "_")
+    #     string_index = file_name.find("_", 2)
+    #     output_file_name = file_name[string_index + 1:]
+    #     datafed_id = file_name[:string_index].replace("_", "/")
+    #
+    #     output = generate_sibling_context(res)
+    #     sibling_cache = get_sibling_cache_from_context(output)
+    #     flat = flatten(res)
+    #     prepared_list = get_meta(flat, datafed_id)
+    #
+    #     file_path = os.path.join(output_dir, output_file_name)
+    #     with open(file_path, "w") as outfile:
+    #         json.dump(prepared_list, outfile)
+    # else:
+    #     print(f"Metadata missing or empty for item {each.id}")
