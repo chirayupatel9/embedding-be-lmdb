@@ -114,8 +114,7 @@ df_api.loginByPassword("cnp68","Chirayu#2099patel")
 df_api.setContext('p/2023_symmetry_dataset_single_record')
 
 coll_list_resp = df_api.collectionItemsList('c/463416128', count=10000)
-# print(f"coll_list_resp:{coll_list_resp}")
-# Ensure the directory exists
+
 output_dir = r"static/datafed_dump"
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
