@@ -36,7 +36,7 @@ def generate_tsne_embedding(images, random_state=42):
     return tsne_embedding
 
 
-def save_embeddings_to_json(embedding, labels, categories, sprite_paths,
+def save_embeddings(embedding, labels, categories, sprite_paths,
                             output_path="embeddings_with_labels_and_sprites.json"):
     data = {
         "items": [
