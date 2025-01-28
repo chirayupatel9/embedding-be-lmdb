@@ -7,6 +7,7 @@ from PIL import Image
 import os
 import numpy as np
 import json
+from urllib.parse import unquote
 
 app = FastAPI()
 
@@ -57,11 +58,20 @@ def create_sprite_sheet(image_folder, output_sprite, output_json, materials, red
         raise ValueError("Invalid reduction method. Choose 'tsne' or 'umap'.")
 
     embeddings = reducer.fit_transform(images_flat)
+# Normalize embeddings for canvas
+    canvas_width, canvas_height = 4000, 1000  # Replace with actual canvas dimensions
 
-    # Normalize embeddings for better visualization
     embeddings_min = embeddings.min(axis=0)
     embeddings_max = embeddings.max(axis=0)
+
     normalized_embeddings = (embeddings - embeddings_min) / (embeddings_max - embeddings_min)
+    normalized_embeddings[:, 0] *= canvas_width  # Scale x to canvas width
+    normalized_embeddings[:, 1] *= canvas_height 
+    print(normalized_embeddings)
+    # Normalize embeddings for better visualization
+    # embeddings_min = embeddings.min(axis=0)
+    # embeddings_max = embeddings.max(axis=0)
+    # normalized_embeddings = (embeddings - embeddings_min) / (embeddings_max - embeddings_min)
 
     # Create sprite sheet
     sprite_dim = int(np.ceil(np.sqrt(len(images))))  # Dimensions of the sprite sheet
@@ -108,8 +118,12 @@ async def generate_sprite_sheet(dataset_path: str = Form(...), method: str = For
     Returns:
         JSONResponse with paths to sprite sheet and metadata.
     """
+    dataset_path = unquote(dataset_path)
+    print(f'dataset_path:{dataset_path}')
     try:
         if not os.path.exists(dataset_path):
+            print(f'dataset_path:{dataset_path}')
+
             return JSONResponse({"error": "Dataset path does not exist."}, status_code=400)
 
         output_dir = "output"

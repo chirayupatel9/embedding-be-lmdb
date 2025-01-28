@@ -1,0 +1,9 @@
+fastapi
+scikit-learn
+datafed
+umap-learn
+opencv-python
+numpy
+uvicorn
+Pillow
+python-multipart
