@@ -1,3 +1,6 @@
 .venv
 .idea
 static
+__pycache__/*
+*.pyc
+.env
