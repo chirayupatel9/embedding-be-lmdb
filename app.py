@@ -145,3 +145,39 @@ async def get_image_with_details(image_id: str):
     
     raise HTTPException(status_code=404, detail="❌ Image or Document Not Found")
 
+@app.post("/api/upload-images")
+async def upload_images(folder_path: str = Form(...)):
+    """Upload all images in a folder to MongoDB"""
+    if not os.path.exists(folder_path):
+        raise HTTPException(status_code=400, detail="❌ Folder not found")
+
+    response = upload_images_from_folder(folder_path)
+    return response
+
+@app.get("/api/fetch-image/{image_id}")
+async def fetch_image(image_id: str):
+    """
+    Retrieve an image from MongoDB GridFS using its `image_id`.
+    
+    Args:
+        image_id (str): MongoDB GridFS ObjectId of the image.
+
+    Returns:
+        StreamingResponse: Returns the image as a binary stream.
+    """
+    try:
+        file = fs.get(ObjectId(image_id))  # Fetch image from GridFS
+        image_bytes = file.read()
+        return StreamingResponse(BytesIO(image_bytes), media_type="image/jpeg")
+    
+    except gridfs.errors.NoFile:
+        raise HTTPException(status_code=404, detail="❌ Image Not Found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"❌ Server Error: {str(e)}")
+    
+@app.get("/api/generate-sprite-sheet")
+async def generate_sprite_sheet():
+    """
+    Generate a sprite sheet and metadata using t-SNE or UMAP.
+    """
+    return fetch_images_from_mongodb()

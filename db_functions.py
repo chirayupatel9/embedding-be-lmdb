@@ -14,7 +14,6 @@ class JSONEncoder(json.JSONEncoder):
             return str(o)
         return super().default(o)
 
-
 # CRUD Functions with Image Linking
 def create_document_with_image(document_data, filename, file_data):
     """Insert a new document with an image"""
@@ -128,3 +127,51 @@ def get_all_images_with_details():
             })
 
     return images_with_details
+
+
+
+
+# 🚀 New Function to Upload All Images from a Folder
+def upload_images_from_folder(folder_path):
+    """Upload all images in a folder and associate them with documents"""
+    uploaded_files = []
+    print(f"Uploading images from folder: {folder_path}")
+    if not os.path.exists(folder_path):
+        return {"error": "Folder not found"}
+
+    for filename in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, filename)
+        # print(f"Processing file: {file_path}")
+        if os.path.isfile(file_path):
+            with open(file_path, "rb") as f:
+                # Upload image to GridFS
+                # print(f"Uploading image: {filename}")
+                img = f.read()
+                # print(img)
+                image_id = fs.put(img, filename=filename)
+                # print(f"Image uploaded with ID: {image_id}")
+                # Create document with image reference
+                document_data = {
+                    "filename": filename,
+                    "image_id": str(image_id)
+                }
+                # print(f"Document data: {document_data}")
+                result = collection.insert_one(document_data)
+                # print(f"Document inserted with ID: {result.inserted_id}")
+                uploaded_files.append({
+                    "document_id": str(result.inserted_id),
+                    "image_id": str(image_id),
+                    "filename": filename
+                })
+
+    return {
+        "message": "✅ Images uploaded successfully",
+        "uploaded_files": uploaded_files
+    }
+# imgpath = '/home/cnp68/globus-data/3/409258704.png'
+# if os.path.isfile(imgpath):
+#     with open(imgpath, "rb") as f:
+#         print(f.read())
+# folder_path = "/home/cnp68/globus-data/3/"
+# response = upload_images_from_folder(folder_path)
+# print(response)67c77cc0325f1fb7a7aa6d90
