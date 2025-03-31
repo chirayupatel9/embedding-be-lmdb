@@ -19,9 +19,6 @@ GLOBUS_PATH = os.environ.get("GLOBUS_PATH")
 IMAGE_PATH = os.environ.get("IMAGE_PATH")
 output_dir = os.environ.get("OUTPUT_DIR")
 
-
-
-
 df_api = API()
 df_api.loginByPassword(DATAFED_USER_NAME, DATAFED_PASSWORD)
 df_api.setContext(DATAFED_PROJECT_ID)#(os.environ.get("PROJECT_ID"))
