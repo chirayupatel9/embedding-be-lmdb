@@ -25,47 +25,77 @@ app.add_middleware(
 
 app.mount("/output", StaticFiles(directory="output"), name="output")
 
-@app.get("/api/embeddings")
-async def get_embeddings():
+@app.get("/api/generate-sprite-sheet")
+async def generate_sprite_sheet(method: str = "tsne"):
+    """
+    Generate a sprite sheet and metadata from MongoDB images.
+    Args:
+        method (str): Dimensionality reduction method ("tsne" or "umap")
+    """
     try:
-        with open("./output/metadata.json", "r") as file:
+        # Create output directory if it doesn't exist
+        output_dir = "output"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Set output paths
+        output_sprite = os.path.join(output_dir, "sprite_sheet.png")
+        output_json = os.path.join(output_dir, "metadata.json")
+        
+        # Generate sprite sheet from MongoDB
+        result = create_sprite_sheet_from_mongodb(
+            output_sprite=output_sprite,
+            output_json=output_json,
+            reduction_method=method
+        )
+        
+        return JSONResponse({
+            "spritePath": "/output/sprite_sheet.png",
+            "metadataPath": "/output/metadata.json",
+            "numImages": result["num_images"]
+        })
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/embeddings")
+async def get_embeddings(method: str = "tsne"):
+    """
+    Get the sprite sheet and metadata. If they don't exist, generate them first.
+    Args:
+        method (str): Dimensionality reduction method ("tsne" or "umap")
+    """
+    try:
+        # Check if metadata file exists
+        metadata_path = "./output/metadata.json"
+        sprite_path = "./output/sprite_sheet.png"
+        
+        if not os.path.exists(metadata_path) or not os.path.exists(sprite_path):
+            # Generate sprite sheet and metadata if they don't exist
+            output_dir = "output"
+            os.makedirs(output_dir, exist_ok=True)
+            
+            result = create_sprite_sheet_from_mongodb(
+                output_sprite=sprite_path,
+                output_json=metadata_path,
+                reduction_method=method
+            )
+            
+            if not result:
+                raise HTTPException(status_code=500, detail="Failed to generate sprite sheet")
+        
+        # Read and return the metadata
+        with open(metadata_path, "r") as file:
             json_data = json.load(file)
+            
         return JSONResponse({
             "spritePath": "/output/sprite_sheet.png",
             "itemsPath": json_data
         })
+        
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Metadata file not found")
+        raise HTTPException(status_code=404, detail="Failed to generate or find metadata file")
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Invalid metadata file format")
-
-@app.post("/api/embedding")
-async def generate_sprite_sheet(dataset_path: str = Form(...), method: str = Form("tsne")):
-    dataset_path = unquote(dataset_path)
-    try:
-        if not os.path.exists(dataset_path):
-            raise HTTPException(status_code=400, detail="Dataset path does not exist")
-
-        output_dir = "output"
-        os.makedirs(output_dir, exist_ok=True)
-        output_sprite = os.path.join(output_dir, "sprite_sheet.png")
-        output_json = os.path.join(output_dir, "metadata.json")
-
-        materials = ['wood', 'metal', 'plastic', 'glass', 'stone']
-
-        create_sprite_sheet(
-            image_folder=dataset_path,
-            output_sprite=output_sprite,
-            output_json=output_json,
-            materials=materials,
-            reduction_method=method
-        )
-
-        return JSONResponse({
-            "spritePath": output_sprite,
-            "itemsPath": output_json
-        })
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -140,19 +170,5 @@ async def upload_images(folder_path: str = Form(...)):
             raise HTTPException(status_code=400, detail="Folder not found")
         response = upload_images_from_folder(folder_path)
         return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/generate-sprite-sheet")
-async def generate_sprite_sheet():
-    try:
-        images, metadata = fetch_images_from_mongodb()
-        if not images:
-            raise HTTPException(status_code=404, detail="No images found in database")
-        
-        return JSONResponse({
-            "images": len(images),
-            "metadata": metadata
-        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

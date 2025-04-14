@@ -93,7 +93,7 @@ def get_all_images():
         })
 
     return images
-print(get_all_images())
+# print(get_all_images())
 def get_image_with_details(image_id):
     """Retrieve an image along with its linked document"""
     try:
