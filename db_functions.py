@@ -93,21 +93,19 @@ def get_all_images():
         })
 
     return images
-
-
+print(get_all_images())
 def get_image_with_details(image_id):
     """Retrieve an image along with its linked document"""
     try:
-        # file = fs.get(ObjectId(image_id))
-        # image_data = file.read()
-        
         # Fetch linked document
         document = collection.find_one({"image_id": str(image_id)})
         if document:
             document["_id"] = str(document["_id"])  # Convert ObjectId
             return document
-    except Exception:
-        return None, None
+        return None
+    except Exception as e:
+        print(f"Error in get_image_with_details: {str(e)}")
+        return None
 
 
 def get_all_images_with_details():

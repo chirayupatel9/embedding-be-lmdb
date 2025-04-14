@@ -2,41 +2,44 @@ from pymongo import MongoClient
 from bson import ObjectId
 import gridfs
 from dotenv import load_dotenv
-from os.path import dirname,join
+from os.path import dirname, join
 import os
 
 dotenv_path = join(dirname(__file__), '.env')
 load_dotenv(dotenv_path)
 
-
 # MongoDB connection details
-# MONGO_HOST = os.environ.get("MONGO_HOST", "localhost")
-# MONGO_PORT = int(os.environ.get("MONGO_PORT", 27017))
-# USERNAME = os.environ.get("USERNAME", "localuser")
-# PASSWORD = os.environ.get("PASSWORD", "localpassword")
-# AUTH_DB = os.environ.get("AUTH_DB", "admin")
-# DB_NAME = os.environ.get("DB_NAME", "testdb")
-# COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "dynamic_collection")
-MONGO_HOST = "localhost"
-MONGO_PORT = 27017
-USERNAME = "mongouser"
-PASSWORD = "password123"
-AUTH_DB = "admin"
-DB_NAME = "2022_materials_project"
-COLLECTION_NAME = "dynamic_collection"
+MONGO_HOST = os.environ.get("MONGO_HOST", "localhost")
+MONGO_PORT = int(os.environ.get("MONGO_PORT", 27017))
+USERNAME = os.environ.get("MONGO_USERNAME", "mongouser")
+PASSWORD = os.environ.get("MONGO_PASSWORD", "password123")
+AUTH_DB = os.environ.get("MONGO_AUTH_DB", "admin")
+DB_NAME = os.environ.get("MONGO_DB_NAME", "2022_materials_project_1")
+COLLECTION_NAME = os.environ.get("MONGO_COLLECTION", "dynamic_collection")
+
 # Create MongoDB client
 try:
-    # mongodb://127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=mongosh+2.3.9
-    client = MongoClient(f"mongodb://{USERNAME}:{PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{AUTH_DB}?authSource={AUTH_DB}")
-    print(client)
+    # Construct MongoDB URI
+    mongo_uri = f"mongodb://{USERNAME}:{PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{AUTH_DB}?authSource={AUTH_DB}&retryWrites=true&w=majority"
+    
+    # Create client with connection timeout
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+    
+    # Test the connection
+    client.server_info()
+    
+    # Initialize database and collections
     db = client[DB_NAME]
-    fs = gridfs.GridFS(db)  # Initialize GridFS for file storage
+    fs = gridfs.GridFS(db)
     collection = db[COLLECTION_NAME]
+    
     print("✅ Connected to MongoDB successfully!")
-    print("🔍 Databases:", client.list_database_names())
+    print(f"🔍 Using database: {DB_NAME}")
+    print(f"🔍 Using collection: {COLLECTION_NAME}")
 
 except Exception as e:
-    print("❌ Error connecting to MongoDB:", e)
+    print(f"❌ Error connecting to MongoDB: {str(e)}")
+    raise
 
 
 
