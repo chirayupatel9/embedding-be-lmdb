@@ -11,6 +11,7 @@ from db_functions import get_all_documents as db_get_all_documents, get_document
 from bson import ObjectId
 import gridfs
 from io import BytesIO
+import numpy as np
 
 app = FastAPI()
 
@@ -23,7 +24,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/output", StaticFiles(directory="output"), name="output")
+app.mount("/api/output", StaticFiles(directory="api/output"), name="/api/output")
 
 @app.get("/api/generate-sprite-sheet")
 async def generate_sprite_sheet(method: str = "tsne"):
@@ -49,8 +50,8 @@ async def generate_sprite_sheet(method: str = "tsne"):
         )
         
         return JSONResponse({
-            "spritePath": "/output/sprite_sheet.png",
-            "metadataPath": "/output/metadata.json",
+            "spritePath": "/api/output/sprite_sheet.png",
+            "metadataPath": "/api/output/metadata.json",
             "numImages": result["num_images"]
         })
         
@@ -83,12 +84,26 @@ async def get_embeddings(method: str = "tsne"):
             if not result:
                 raise HTTPException(status_code=500, detail="Failed to generate sprite sheet")
         
-        # Read and return the metadata
+        # Read the metadata
         with open(metadata_path, "r") as file:
             json_data = json.load(file)
             
+        # Calculate sprite sheet dimensions
+        num_images = len(json_data)
+        sprite_dim = int(np.ceil(np.sqrt(num_images)))
+        sprite_width = 32  # Each sprite is 32x32 pixels
+        sprite_height = 32
+        
         return JSONResponse({
-            "spritePath": "/output/sprite_sheet.png",
+            "spritePath": {
+                "columns": sprite_dim,
+                "rows": sprite_dim,
+                "width": sprite_dim * sprite_width,
+                "height": sprite_dim * sprite_height,
+                "sprite_width": sprite_width,
+                "sprite_height": sprite_height,
+                "url": "/output/sprite_sheet.png"
+            },
             "itemsPath": json_data
         })
         
