@@ -39,7 +39,16 @@ for idx, each in enumerate(coll_list_resp[0].item):
             metadata_str = dv_resp[0].data[0].metadata
             try:
                 res = json.loads(metadata_str)
-                print(f"Metadata loaded for item {res}")
+                file_name = f"{each.id}.json"
+
+                if not os.path.exists(file_name):
+                    with open(file_name, 'w') as f:
+                        json.dump(res, f, indent=4)
+                    print(f"✅ JSON object saved to file: {file_name}")
+                else:
+                    print(f"⚠️ File '{file_name}' already exists. Not overwriting.")
+
+                print(f"📄 Metadata loaded for item {each.id}: {res}")
             except json.JSONDecodeError as e:
                 print(f"Error decoding JSON for item {each.id}: {e}")
                 continue  # Skip to the next item if JSON is invalid
