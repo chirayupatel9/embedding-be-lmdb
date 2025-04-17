@@ -187,3 +187,71 @@ async def upload_images(folder_path: str = Form(...)):
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/upload-images-with-metadata")
+async def upload_images_with_metadata(
+    images_folder: str = Form(...),
+    metadata_folder: str = Form(...)
+):
+    """
+    Upload images and their corresponding metadata from two separate folders.
+    Args:
+        images_folder (str): Path to the folder containing images
+        metadata_folder (str): Path to the folder containing JSON metadata files
+    """
+    try:
+        if not os.path.exists(images_folder) or not os.path.exists(metadata_folder):
+            raise HTTPException(status_code=400, detail="One or both folders do not exist")
+
+        # Get list of image files and metadata files
+        image_files = [f for f in os.listdir(images_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+        metadata_files = [f for f in os.listdir(metadata_folder) if f.lower().endswith('.json')]
+
+        if not image_files:
+            raise HTTPException(status_code=400, detail="No image files found in the images folder")
+        if not metadata_files:
+            raise HTTPException(status_code=400, detail="No metadata files found in the metadata folder")
+
+        uploaded_count = 0
+        errors = []
+
+        # Process each image and its corresponding metadata
+        for image_file in image_files:
+            try:
+                # Find corresponding metadata file (same name but with .json extension)
+                metadata_file = os.path.splitext(image_file)[0] + '.json'
+                if metadata_file not in metadata_files:
+                    errors.append(f"No metadata found for {image_file}")
+                    continue
+
+                # Read the image
+                image_path = os.path.join(images_folder, image_file)
+                with open(image_path, 'rb') as img_file:
+                    image_data = img_file.read()
+
+                # Read the metadata
+                metadata_path = os.path.join(metadata_folder, metadata_file)
+                with open(metadata_path, 'r') as meta_file:
+                    metadata = json.load(meta_file)
+
+                # Store image in GridFS
+                image_id = str(fs.put(image_data, filename=image_file))
+
+                # Add image_id to metadata and store in MongoDB
+                metadata['image_id'] = image_id
+                collection.insert_one(metadata)
+
+                uploaded_count += 1
+
+            except Exception as e:
+                errors.append(f"Error processing {image_file}: {str(e)}")
+                continue
+
+        return {
+            "message": f"Successfully uploaded {uploaded_count} images with metadata",
+            "errors": errors if errors else None
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+  
