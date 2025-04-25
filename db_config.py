@@ -14,7 +14,7 @@ MONGO_PORT = int(os.environ.get("MONGO_PORT", 27017))
 USERNAME = os.environ.get("MONGO_USERNAME", "mongouser")
 PASSWORD = os.environ.get("MONGO_PASSWORD", "password123")
 AUTH_DB = os.environ.get("MONGO_AUTH_DB", "admin")
-DB_NAME = os.environ.get("MONGO_DB_NAME", "2022_materials_project_1")
+DB_NAME = os.environ.get("MONGO_DB_NAME", "2022_materials_project_3")
 COLLECTION_NAME = os.environ.get("MONGO_COLLECTION", "dynamic_collection")
 
 # Create MongoDB client
