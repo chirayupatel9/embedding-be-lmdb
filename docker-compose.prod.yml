@@ -1,0 +1,41 @@
+version: '3'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8000:8000"
+    restart: always
+    container_name: embedding-backend-prod
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MONGO_URI=mongodb://mongo:27017/
+      - LOG_LEVEL=ERROR
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
+    depends_on:
+      - mongo
+
+  mongo:
+    image: mongo:latest
+    volumes:
+      - mongo_data_prod:/data/db
+    restart: always
+    container_name: mongodb-prod
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
+    command: ["--auth"]
+
+volumes:
+  mongo_data_prod: 

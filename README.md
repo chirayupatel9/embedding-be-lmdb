@@ -113,3 +113,48 @@ graph TD
     class Images,Metadata,SpriteSheet storage
     class UploadEP,EmbeddingsEP,GetImageEP,GetAllEP,GetDetailsEP endpoint
 ```
+
+## Docker Setup
+
+### Development Environment
+
+To run the application in development mode:
+
+1. Clone the repository
+2. Navigate to the project directory
+3. Run:
+
+```bash
+docker-compose -f docker-compose.dev.yml up --build
+```
+
+This will:
+- Mount the local code directory into the container for hot-reloading
+- Run with the debug mode enabled
+- Use non-authenticated MongoDB instance
+
+### Production Environment
+
+For production deployment:
+
+1. Create a `.env` file with the following variables:
+   ```
+   MONGO_USER=your_mongo_username
+   MONGO_PASSWORD=your_secure_password
+   ```
+
+2. Run:
+
+```bash
+docker-compose -f docker-compose.prod.yml up -d
+```
+
+This will:
+- Use a multi-stage build for smaller image size
+- Run MongoDB with authentication
+- Set resource limits for containers
+- Use multiple workers for better performance
+
+### Accessing the API
+
+The API will be available at: http://localhost:8000
