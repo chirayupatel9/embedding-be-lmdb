@@ -6,10 +6,10 @@ from os.path import dirname, join
 import os
 
 dotenv_path = join(dirname(__file__), '.env')
-load_dotenv(dotenv_path)
+load_dotenv()
 
 # MongoDB connection details
-MONGO_HOST = os.environ.get("MONGO_HOST", "localhost")
+MONGO_HOST = os.environ.get("MONGO_HOST", "m3kube.urcf.drexel.edu")
 MONGO_PORT = int(os.environ.get("MONGO_PORT", 27017))
 USERNAME = os.environ.get("MONGO_USERNAME", "mongouser")
 PASSWORD = os.environ.get("MONGO_PASSWORD", "password123")

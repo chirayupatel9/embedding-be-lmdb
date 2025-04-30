@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, Form, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
@@ -26,6 +26,9 @@ app.add_middleware(
 )
 
 app.mount("/api/output", StaticFiles(directory="api/output"), name="/api/output")
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/docs")
 
 @app.get("/api/generate-sprite-sheet")
 async def generate_sprite_sheet(method: str = "tsne"):
