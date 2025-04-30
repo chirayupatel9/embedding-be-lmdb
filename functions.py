@@ -2,7 +2,6 @@ import json
 import numpy as np
 from PIL import Image
 from sklearn.manifold import TSNE
-import umap.umap_ as umap
 import gridfs
 from pymongo import MongoClient
 from io import BytesIO
