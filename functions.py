@@ -9,6 +9,9 @@ from io import BytesIO
 from bson import ObjectId
 from db_config import *
 import os
+from tsne_gpu import run_tsne_on_images_gpu
+from umap_gpu import run_umap_on_images_gpu
+import tempfile
 
 # # MongoDB Configuration
 # MONGO_URI = "mongodb://your_username:your_password@localhost:27017/your_database?authSource=admin"
@@ -120,12 +123,40 @@ def create_sprite_sheet(image_folder, output_sprite="sprite_sheet.png", output_j
                 learning_rate=200
             )
         elif reduction_method == "umap":
-            reducer = umap.UMAP(
-                n_components=2,
-                random_state=42,
-                n_neighbors=min(15, len(images) - 1),
-                min_dist=0.1
-            )
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_filenames = []
+                for idx, img in enumerate(images):
+                    temp_path = os.path.join(temp_dir, f"img_{idx}.png")
+                    Image.fromarray(img).save(temp_path)
+                    metadata[idx]["file_path"] = temp_path
+                    temp_filenames.append(temp_path)
+
+                embeddings, _ = run_umap_on_images_gpu(
+                    image_folder=temp_dir,
+                    batch_size=32,
+                    n_neighbors=min(15, len(temp_filenames) - 1),
+                    min_dist=0.1
+        )
+        elif reduction_method == "tsne":
+
+            # Save resized images to temp folder for the GPU-based feature extractor
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_filenames = []
+                for idx, img in enumerate(images):
+                    temp_path = os.path.join(temp_dir, f"img_{idx}.png")
+                    Image.fromarray(img).save(temp_path)
+                    metadata[idx]["file_path"] = temp_path  # Needed for final sprite metadata
+                    temp_filenames.append(temp_path)
+
+                # Run GPU-based CNN + t-SNE pipeline
+                embeddings, _ = run_tsne_on_images_gpu(
+                    image_folder=temp_dir,
+                    batch_size=32,
+                    perplexity=min(30, len(temp_filenames) - 1),
+                    n_iter=1000,
+                    learning_rate=200
+                )
         else:
             raise ValueError("Invalid reduction method. Choose 'tsne' or 'umap'")
 
@@ -209,23 +240,53 @@ def create_sprite_sheet_from_mongodb(output_sprite="sprite_sheet.png", output_js
         images_flat = images.reshape(len(images), -1)
 
         # Perform dimensionality reduction with adjusted parameters
-        if reduction_method == "tsne":
-            reducer = TSNE(
-                n_components=2,
-                random_state=42,
-                perplexity=min(30, len(images) - 1),
-                max_iter=1000,
-                learning_rate=200,
-                n_jobs=1  # Set to 1 to avoid threading issues
-            )
-        elif reduction_method == "umap":
-            reducer = umap.UMAP(
-                n_components=2,
-                random_state=42,
-                n_neighbors=min(15, len(images) - 1),
-                min_dist=0.1,
-                n_jobs=1  # Set to 1 to avoid threading issues
-            )
+        # if reduction_method == "tsne":
+        #     reducer = TSNE(
+        #         n_components=2,
+        #         random_state=42,
+        #         perplexity=min(30, len(images) - 1),
+        #         max_iter=1000,
+        #         learning_rate=200,
+        #         n_jobs=1  # Set to 1 to avoid threading issues
+        #     )
+        # el
+        if reduction_method == "umap":
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_filenames = []
+                for idx, img in enumerate(images):
+                    temp_path = os.path.join(temp_dir, f"img_{idx}.png")
+                    Image.fromarray(img).save(temp_path)
+                    metadata[idx]["file_path"] = temp_path
+                    temp_filenames.append(temp_path)
+
+                embeddings, _ = run_umap_on_images_gpu(
+                    image_folder=temp_dir,
+                    batch_size=32,
+                    n_neighbors=min(15, len(temp_filenames) - 1),
+                    min_dist=0.1
+        )
+        elif reduction_method == "tsne":
+            from PIL import Image
+            import tempfile
+
+            # Save resized images to temp folder for the GPU-based feature extractor
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_filenames = []
+                for idx, img in enumerate(images):
+                    temp_path = os.path.join(temp_dir, f"img_{idx}.png")
+                    Image.fromarray(img).save(temp_path)
+                    metadata[idx]["file_path"] = temp_path  # Needed for final sprite metadata
+                    temp_filenames.append(temp_path)
+
+                # Run GPU-based CNN + t-SNE pipeline
+                embeddings, _ = run_tsne_on_images_gpu(
+                    image_folder=temp_dir,
+                    batch_size=32,
+                    perplexity=min(30, len(temp_filenames) - 1),
+                    n_iter=1000,
+                    learning_rate=200
+                )
         else:
             raise ValueError("Invalid reduction method. Choose 'tsne' or 'umap'")
 

@@ -19,7 +19,7 @@ app = FastAPI()
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*", "http://localhost:5173"],
+    allow_origins=["*", "http://localhost:5173","0.0.0.0:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,7 +68,7 @@ async def get_embeddings(method: str = "tsne"):
     """
     try:
         # Check if metadata file exists
-        metadata_path = "./output/metadata.json"
+        metadata_path = f"./output/{method}_metadata.json"
         sprite_path = "./output/sprite_sheet.png"
         
         if not os.path.exists(metadata_path) or not os.path.exists(sprite_path):
@@ -373,3 +373,48 @@ async def get_image_with_metadata(image_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
   
+  
+@app.get("/api/dimensionality-reduction/{method}")
+async def dimensionality_reduction(method: str):
+    """
+    Perform dimensionality reduction using either UMAP or t-SNE.
+    Args:
+        method (str): Dimensionality reduction method ("tsne" or "umap")
+    Returns:
+        JSONResponse: Contains the reduced coordinates and metadata
+    """
+    try:
+        if method.lower() not in ["tsne", "umap"]:
+            raise HTTPException(status_code=400, detail="Method must be either 'tsne' or 'umap'")
+        
+        # Perform dimensionality reduction
+        if method.lower() == "tsne":
+            metadata_path = f"./output/{method}_metadata.json"
+        else:  # umap
+            metadata_path = f"./output/{method}_metadata.json"
+        
+        # Prepare response
+        with open(metadata_path, "r") as file:
+            json_data = json.load(file)
+            
+        # Calculate sprite sheet dimensions
+        num_images = len(json_data)
+        sprite_dim = int(np.ceil(np.sqrt(num_images)))
+        sprite_width = 32  # Each sprite is 32x32 pixels
+        sprite_height = 32
+        
+        return JSONResponse({
+            "spritePath": {
+                "columns": sprite_dim,
+                "rows": sprite_dim,
+                "width": sprite_dim * sprite_width,
+                "height": sprite_dim * sprite_height,
+                "sprite_width": sprite_width,
+                "sprite_height": sprite_height,
+                "url": "/output/sprite_sheet.png"
+            },
+            "itemsPath": json_data
+        })
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
