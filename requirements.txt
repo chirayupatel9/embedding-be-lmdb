@@ -1,7 +1,6 @@
---extra-index-url https://download.pytorch.org/whl/cu121
-
 fastapi
 scikit-learn
+datafed
 umap-learn
 opencv-python
 numpy
@@ -10,6 +9,3 @@ Pillow
 python-multipart
 pymongo
 python-dotenv
-torch
-torchvision
-cupy
