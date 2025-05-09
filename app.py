@@ -13,6 +13,14 @@ import gridfs
 from io import BytesIO
 import numpy as np
 import base64
+import torch
+import torch.nn as nn
+from torchvision import transforms, models
+from collections import OrderedDict
+from tqdm import tqdm
+from cuml.manifold import TSNE
+import cupy as cp
+from PIL import Image
 
 app = FastAPI()
 
@@ -379,6 +387,7 @@ async def get_image_with_metadata(image_id: str):
   
 @app.get("/api/dimensionality-reduction/{method}")
 async def dimensionality_reduction(method: str):
+
     """
     Perform dimensionality reduction using either UMAP or t-SNE.
     Args:
@@ -421,3 +430,110 @@ async def dimensionality_reduction(method: str):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+def resnet50_embedding(in_channels=3, n_classes=17, dropout=0.5):
+    model = models.resnet50(weights=None)
+    model.conv1 = nn.Conv2d(in_channels, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+    model.fc = nn.Sequential(
+        nn.BatchNorm1d(2048),
+        nn.Dropout(p=dropout),
+        nn.Linear(2048, 512, bias=False),
+        nn.ReLU(inplace=True),
+        nn.BatchNorm1d(512),
+        nn.Dropout(p=dropout),
+        nn.Linear(512, 64, bias=False),
+        nn.ReLU(inplace=True),
+        nn.BatchNorm1d(64),
+        nn.Dropout(p=dropout),
+        nn.Linear(64, n_classes, bias=True)
+    )
+    return model
+
+def generate_tsne_from_mongodb(
+    batch_size=32,
+    output_dim=2,
+    perplexity=30,
+    device_str="cuda:0" if torch.cuda.is_available() else "cpu"
+):
+    device = torch.device(device_str)
+    
+    # Initialize model
+    model = resnet50_embedding()
+    model.to(device)
+    model.eval()
+    
+    # Truncate FC head for embeddings
+    model.fc = nn.Sequential(*list(model.fc.children())[:6])
+    
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+    
+    # Fetch images from MongoDB
+    images = []
+    metadata = []
+    
+    for file in fs.find():
+        try:
+            image_id = str(file._id)
+            image_bytes = file.read()
+            img = Image.open(BytesIO(image_bytes)).convert("RGB")
+            img_tensor = transform(img)
+            images.append(img_tensor)
+            
+            # Get metadata
+            document = collection.find_one({"image_id": image_id})
+            metadata.append({
+                "image_id": image_id,
+                "filename": file.filename,
+                "category": document.get("category", "Unknown") if document else "Unknown"
+            })
+        except Exception as e:
+            print(f"Error processing image {image_id}: {str(e)}")
+            continue
+    
+    if not images:
+        raise Exception("No valid images found in MongoDB")
+    
+    # Convert to tensor batch
+    images = torch.stack(images)
+    
+    # Extract features
+    embeddings = []
+    with torch.no_grad():
+        for i in tqdm(range(0, len(images), batch_size), desc="Extracting Features"):
+            batch = images[i:i + batch_size].to(device)
+            feats = model(batch)
+            embeddings.append(feats.cpu().numpy())
+    
+    embeddings = np.vstack(embeddings)
+    
+    # Run cuML t-SNE
+    print("Running cuML t-SNE...")
+    embeddings_gpu = cp.asarray(embeddings)
+    tsne = TSNE(n_components=output_dim, perplexity=perplexity, n_iter=1000, verbose=1)
+    tsne_result_gpu = tsne.fit_transform(embeddings_gpu)
+    tsne_result = cp.asnumpy(tsne_result_gpu)
+    
+    return tsne_result, metadata
+
+@app.get("/api/make_tsne")
+async def make_tsne():
+    """
+    Generate t-SNE embeddings from images in MongoDB
+    """
+    try:
+        tsne_result, metadata = generate_tsne_from_mongodb()
+        
+        # Prepare response
+        response_data = {
+            "coordinates": tsne_result.tolist(),
+            "metadata": metadata
+        }
+        
+        return JSONResponse(response_data)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+

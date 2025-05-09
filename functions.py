@@ -10,12 +10,6 @@ from bson import ObjectId
 from db_config import *
 import os
 
-# # MongoDB Configuration
-# MONGO_URI = "mongodb://your_username:your_password@localhost:27017/your_database?authSource=admin"
-# client = MongoClient(MONGO_URI)
-# db = client["your_database"]
-# fs = gridfs.GridFS(db
-
 
 def fetch_images_from_mongodb():
     """
