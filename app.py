@@ -22,6 +22,7 @@ from tqdm import tqdm
 from cuml.manifold import TSNE
 import cupy as cp
 from PIL import Image
+from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
 
@@ -454,10 +455,12 @@ def generate_tsne_from_mongodb(
     batch_size=32,
     output_dim=2,
     perplexity=30,
-    device_str="cuda:0"
+    device_str="cuda:0",
+    mongo_batch_size=2000  # New parameter for MongoDB batch size
 ):
     device = torch.device(device_str)
     print(f"Using device: {device}")
+    
     # Initialize model
     model = resnet50_embedding()
     model.to(device)
@@ -471,48 +474,69 @@ def generate_tsne_from_mongodb(
         transforms.ToTensor(),
     ])
     
-    # Fetch images from MongoDB
-    images = []
-    metadata = []
-    
     # Get total count of files for progress bar
     total_files = fs._GridFS__files.count_documents({})
     print(f"Processing {total_files} images from MongoDB...")
     
-    for file in tqdm(fs.find(), total=total_files, desc="Loading images from MongoDB"):
-        try:
-            image_id = str(file._id)
-            image_bytes = file.read()
-            img = Image.open(BytesIO(image_bytes)).convert("RGB")
-            img_tensor = transform(img)
-            images.append(img_tensor)
-            
-            # Get metadata
-            document = collection.find_one({"image_id": image_id})
-            metadata.append({
-                "image_id": image_id,
-                "filename": file.filename,
-                "category": document.get("category", "Unknown") if document else "Unknown"
-            })
-        except Exception as e:
-            print(f"Error processing image {image_id}: {str(e)}")
-            continue
+    # Initialize lists for batch processing
+    all_embeddings = []
+    all_metadata = []
     
-    if not images:
+    # Process MongoDB files in batches
+    for batch_start in tqdm(range(0, total_files, mongo_batch_size), desc="Processing MongoDB batches"):
+        # Get batch of files
+        files = list(fs.find().skip(batch_start).limit(mongo_batch_size))
+        
+        # Prepare batch data
+        image_ids = [str(file._id) for file in files]
+        image_bytes_list = [file.read() for file in files]
+        
+        # Get metadata for all images in batch
+        metadata_docs = list(collection.find({"image_id": {"$in": image_ids}}))
+        metadata_dict = {doc["image_id"]: doc for doc in metadata_docs}
+        
+        # Process images in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            def process_image(image_bytes, image_id):
+                try:
+                    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+                    img_tensor = transform(img)
+                    return img_tensor, {
+                        "image_id": image_id,
+                        "filename": metadata_dict.get(image_id, {}).get("image_filename", "unknown"),
+                        "category": metadata_dict.get(image_id, {}).get("category", "Unknown")
+                    }
+                except Exception as e:
+                    print(f"Error processing image {image_id}: {str(e)}")
+                    return None, None
+            
+            # Process images in parallel
+            results = list(executor.map(
+                lambda x: process_image(x[0], x[1]),
+                zip(image_bytes_list, image_ids)
+            ))
+        
+        # Filter out failed processing attempts and prepare batch
+        valid_results = [(img, meta) for img, meta in results if img is not None]
+        if not valid_results:
+            continue
+            
+        images, metadata = zip(*valid_results)
+        images = torch.stack(images)
+        
+        # Extract features in batches
+        with torch.no_grad():
+            for i in range(0, len(images), batch_size):
+                batch = images[i:i + batch_size].to(device)
+                feats = model(batch)
+                all_embeddings.append(feats.cpu().numpy())
+                all_metadata.extend(metadata[i:i + batch_size])
+    
+    if not all_embeddings:
         raise Exception("No valid images found in MongoDB")
     
-    # Convert to tensor batch
-    images = torch.stack(images)
-    
-    # Extract features
-    embeddings = []
-    with torch.no_grad():
-        for i in tqdm(range(0, len(images), batch_size), desc="Extracting Features"):
-            batch = images[i:i + batch_size].to(device)
-            feats = model(batch)
-            embeddings.append(feats.cpu().numpy())
-    
-    embeddings = np.vstack(embeddings)
+    # Combine all embeddings
+    embeddings = np.vstack(all_embeddings)
     
     # Run cuML t-SNE
     print("Running cuML t-SNE...")
@@ -521,7 +545,7 @@ def generate_tsne_from_mongodb(
     tsne_result_gpu = tsne.fit_transform(embeddings_gpu)
     tsne_result = cp.asnumpy(tsne_result_gpu)
     
-    return tsne_result, metadata
+    return tsne_result, all_metadata
 
 @app.get("/api/make_tsne")
 async def make_tsne():
