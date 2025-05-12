@@ -1,3 +1,4 @@
+import time
 from fastapi import FastAPI, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -453,10 +454,10 @@ def generate_tsne_from_mongodb(
     batch_size=32,
     output_dim=2,
     perplexity=30,
-    device_str="cuda:0" if torch.cuda.is_available() else "cpu"
+    device_str="cuda:0"
 ):
     device = torch.device(device_str)
-    
+    print(f"Using device: {device}")
     # Initialize model
     model = resnet50_embedding()
     model.to(device)
@@ -474,7 +475,11 @@ def generate_tsne_from_mongodb(
     images = []
     metadata = []
     
-    for file in fs.find():
+    # Get total count of files for progress bar
+    total_files = fs._GridFS__files.count_documents({})
+    print(f"Processing {total_files} images from MongoDB...")
+    
+    for file in tqdm(fs.find(), total=total_files, desc="Loading images from MongoDB"):
         try:
             image_id = str(file._id)
             image_bytes = file.read()
@@ -524,10 +529,14 @@ async def make_tsne():
     Generate t-SNE embeddings from images in MongoDB
     """
     try:
+        start_time = time.time()
         tsne_result, metadata = generate_tsne_from_mongodb()
+        end_time = time.time()
+        print(f"Time taken: {end_time - start_time} seconds")
         
         # Prepare response
         response_data = {
+            "time_taken": end_time - start_time,
             "coordinates": tsne_result.tolist(),
             "metadata": metadata
         }
