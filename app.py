@@ -203,7 +203,7 @@ def resnet50_embedding(in_channels=3, n_classes=17, dropout=0.5):
     )
     return model
 def generate_tsne_from_lmdb(
-    batch_size=1024,
+    batch_size=512,
     output_dim=2,
     perplexity=30,
     device_str="cuda:0",
@@ -214,6 +214,7 @@ def generate_tsne_from_lmdb(
 
     # Initialize model
     model = resnet50_embedding()
+    
     model.to(device)
     model.eval()
     model.fc = nn.Sequential(*list(model.fc.children())[:6])
@@ -226,12 +227,15 @@ def generate_tsne_from_lmdb(
     ])
 
     # Load all documents from LMDB
+    start_time = time.time()
     documents = db_get_all_documents()
+    end_time = time.time()
+    print(f"Time taken to get all documents: {end_time - start_time} seconds")
     print(f"Processing {len(documents)} images from LMDB...")
 
     all_embeddings = []
     all_metadata = []
-
+    start_time = time.time()
     # Process documents in batches
     for batch_start in tqdm(range(0, len(documents), lmdb_batch_size), desc="Processing LMDB batches"):
         batch_docs = documents[batch_start:batch_start + lmdb_batch_size]
@@ -287,12 +291,13 @@ def generate_tsne_from_lmdb(
                     feats = model(batch_tensor)
                     all_embeddings.append(feats.cpu().numpy())
                     all_metadata.extend(valid_metadata)
-
+    end_time = time.time()
+    print(f"Time taken to process all images: {end_time - start_time} seconds")
     if not all_embeddings:
         raise Exception("No valid images found in LMDB")
 
     embeddings = np.vstack(all_embeddings)
-
+    start_time = time.time()
     print("Running cuML t-SNE...")
     embeddings_gpu = cp.asarray(embeddings)
     tsne = TSNE(
@@ -304,7 +309,8 @@ def generate_tsne_from_lmdb(
     )
     tsne_result_gpu = tsne.fit_transform(embeddings_gpu)
     tsne_result = cp.asnumpy(tsne_result_gpu)
-
+    end_time = time.time()
+    print(f"Time taken to run cuML t-SNE: {end_time - start_time} seconds")
     return tsne_result, all_metadata
 
 @app.get("/api/make_tsne")
