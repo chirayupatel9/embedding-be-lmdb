@@ -1,0 +1,11 @@
+fastapi
+scikit-learn
+datafed
+umap-learn
+opencv-python
+numpy
+uvicorn
+Pillow
+python-multipart
+pymongo
+python-dotenv
