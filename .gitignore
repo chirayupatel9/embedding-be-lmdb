@@ -6,4 +6,8 @@ __pycache__/*
 .env
 *.pth
 *.mdb
-lmdb*/
+lmdb*/yichen_model.pth
+lmdb_database/data.mdb
+lmdb_database/data.mdb
+lmdb_database/*.mdb
+lmdb_database/*
