@@ -313,6 +313,54 @@ def generate_tsne_from_lmdb(batch_size=512, output_dim=2, perplexity=30, device_
 
     return tsne_result, metadata
 
+#---------- Generate t-SNE ---------- #
+ 
+@app.get("/api/dimensionality-reduction/{method}")
+async def dimensionality_reduction(method: str):
+
+    """
+    Perform dimensionality reduction using either UMAP or t-SNE.
+    Args:
+        method (str): Dimensionality reduction method ("tsne" or "umap")
+    Returns:
+        JSONResponse: Contains the reduced coordinates and metadata
+    """
+    try:
+        if method.lower() not in ["tsne", "umap"]:
+            raise HTTPException(status_code=400, detail="Method must be either 'tsne' or 'umap'")
+        
+        # Perform dimensionality reduction
+        if method.lower() == "tsne":
+            metadata_path = f"./output/{method}_metadata.json"
+        else:  # umap
+            metadata_path = f"./output/{method}_metadata.json"
+        
+        # Prepare response
+        with open(metadata_path, "r") as file:
+            json_data = json.load(file)
+            
+        # Calculate sprite sheet dimensions
+        num_images = len(json_data)
+        sprite_dim = int(np.ceil(np.sqrt(num_images)))
+        sprite_width = 32  # Each sprite is 32x32 pixels
+        sprite_height = 32
+        
+        return JSONResponse({
+            "spritePath": {
+                "columns": sprite_dim,
+                "rows": sprite_dim,
+                "width": sprite_dim * sprite_width,
+                "height": sprite_dim * sprite_height,
+                "sprite_width": sprite_width,
+                "sprite_height": sprite_height,
+                "url": "/output/sprite_sheet.png"
+            },
+            "itemsPath": json_data
+        })
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ---------- API Endpoint ---------- #
 @app.get("/api/make_tsne")
 async def make_tsne():
@@ -413,18 +461,23 @@ def create_sprite_sheet_from_mongodb(output_sprite, output_json, reduction_metho
             img = Image.open(BytesIO(image_data)).convert("RGB")
             img = img.resize(thumb_size)
 
-            x = (idx % sprite_dim) * 32
-            y = (idx // sprite_dim) * 32
+            # Calculate sprite position
+            col = idx % sprite_dim
+            row = idx // sprite_dim
+            x = col * 32
+            y = row * 32
+            
             sprite_sheet.paste(img, (x, y))
 
             items.append({
-                "x": float(coordinates[idx][0]),
-                "y": float(coordinates[idx][1]),
+                "embedding": [float(coordinates[idx][0]), float(coordinates[idx][1])],
                 "image_id": meta["image_id"],
                 "filename": meta.get("filename", "unknown"),
                 "category": meta.get("category", "Unknown"),
-                "sprite_x": x,
-                "sprite_y": y,
+                "spriteX": col,  # Column position in sprite grid
+                "spriteY": row,  # Row position in sprite grid
+                "sprite_x": x,   # Pixel x coordinate
+                "sprite_y": y,   # Pixel y coordinate
                 "width": 32,
                 "height": 32
             })
