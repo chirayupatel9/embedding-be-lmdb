@@ -317,18 +317,43 @@ def generate_tsne_from_lmdb(batch_size=512, output_dim=2, perplexity=30, device_
 @app.get("/api/make_tsne")
 async def make_tsne():
     try:
+        # Check for existing t-SNE results
+        output_dir = "./output"
+        sprite_path = f"{output_dir}/sprite_sheet.png"
+        metadata_path = f"{output_dir}/tsne_metadata.json"
+
+        # If both files exist and are not empty, return existing results
+        if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0 and os.path.getsize(metadata_path) > 0:
+            with open(metadata_path, "r") as file:
+                json_data = json.load(file)
+
+            sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
+            sprite_width = 32
+            sprite_height = 32
+
+            return JSONResponse({
+                "spritePath": {
+                    "columns": sprite_dim,
+                    "rows": sprite_dim,
+                    "width": sprite_dim * sprite_width,
+                    "height": sprite_dim * sprite_height,
+                    "sprite_width": sprite_width,
+                    "sprite_height": sprite_height,
+                    "url": "/output/sprite_sheet.png"
+                },
+                "itemsPath": json_data
+            })
+
+        # If files don't exist or are empty, generate new t-SNE
         start_time = time.time()
         tsne_result, metadata = generate_tsne_from_lmdb()
         method = "tsne"
         end_time = time.time()
 
-        # Output paths
-        output_dir = "./output"
+        # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
-        sprite_path = f"{output_dir}/sprite_sheet.png"
-        metadata_path = f"{output_dir}/{method}_metadata.json"
 
-        # Create sprite + metadata if not already there
+        # Create sprite + metadata
         result = create_sprite_sheet_from_mongodb(
             output_sprite=sprite_path,
             output_json=metadata_path,
@@ -421,7 +446,7 @@ async def make_tsne_subset(payload: TSNESubsetRequest):
         if not image_ids:
             raise HTTPException(status_code=400, detail="No image_ids provided.")
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda:0")
         model = initialize_model(device)
 
         transform = transforms.Compose([
