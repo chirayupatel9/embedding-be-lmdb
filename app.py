@@ -109,16 +109,35 @@ def resnet50_embedding(in_channels=3, n_classes=17, dropout=0.5, weights=None):
         nn.Dropout(p=dropout),
         nn.Linear(64, n_classes, bias=True)
     )
+
     return model
+class ResNet50Embedder(nn.Module):
+    def __init__(self, pretrained=True):
+        super().__init__()
+        base = models.resnet50(weights=models.ResNet50_Weights.DEFAULT if pretrained else None)
+        self.features = nn.Sequential(*list(base.children())[:-1])  # Remove FC
+        self.output_dim = 2048
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        return x
 
 # ----------------------------- INITIALIZE MODEL -----------------------------
 def initialize_model(device):
-    model = resnet50_embedding()
+    model = ResNet50Embedder()
     model = model.to(device)
     model.eval()
-    model.fc = nn.Sequential(*list(model.fc.children())[:6])  # Take up to 512 dimension
     print("✅ Model initialized and ready.")
     return model
+
+# def initialize_model(device):
+#     model = resnet50_embedding()
+#     model = model.to(device)
+#     model.eval()
+#     model.fc = nn.Sequential(*list(model.fc.children())[:6])  # Take up to 512 dimension
+#     print("✅ Model initialized and ready.")
+#     return model
 
 # ----------------------------- PROCESS LMDB DOCUMENTS -----------------------------
 def process_lmdb_documents(batch_docs, transform):
@@ -456,7 +475,7 @@ async def make_reduction(method: str):
             raise HTTPException(status_code=400, detail="Invalid method. Use 'tsne' or 'umap'.")
 
         output_dir = "./output"
-        sprite_path = f"{output_dir}/sprite_sheet_{method}.png" if method == "umap" else f"{output_dir}/sprite_sheet.png"
+        sprite_path = f"{output_dir}/sprite_sheet.png"
         metadata_path = f"{output_dir}/{method}_metadata.json"
 
         if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0:
