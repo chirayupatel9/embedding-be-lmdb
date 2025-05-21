@@ -1,13 +1,10 @@
 import time
-from fastapi import FastAPI, UploadFile, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
-import io
 import json
-from urllib.parse import unquote
-from functions import *
 from db_functions_lmdb import ( 
     get_all_documents as db_get_all_documents,
     get_document_by_field as db_get_document_by_field,
@@ -25,9 +22,8 @@ import base64
 import torch
 import torch.nn as nn
 from torchvision import transforms, models
-from collections import OrderedDict
 from tqdm import tqdm
-from cuml.manifold import TSNE
+from cuml.manifold import TSNE, UMAP
 import cupy as cp
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
@@ -44,482 +40,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/api/output", StaticFiles(directory="api/output"), name="/api/output")
-
-@app.get("/")
-async def root():
-    return RedirectResponse(url="/docs")
-
-# ----------------------------- GET ALL DOCUMENTS -----------------------------
-
-@app.get("/api/read")
-async def get_all_documents():
-    try:
-        documents = db_get_all_documents()
-        if not documents:
-            raise HTTPException(status_code=404, detail="No documents found")
-        return documents
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- GET SINGLE DOCUMENT -----------------------------
-
-@app.get("/api/read/{field}/{value}")
-async def get_document_by_field(field: str, value: str):
-    try:
-        document = db_get_document_by_field(field, value)
-        if not document:
-            raise HTTPException(status_code=404, detail="Document not found")
-        return document
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- DELETE DOCUMENT -----------------------------
-
-@app.delete("/api/delete/{field}/{value}")
-async def delete_document(field: str, value: str):
-    try:
-        response = db_delete_document(field, value)
-        if not response:
-            raise HTTPException(status_code=404, detail="Document not found")
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- GET ALL IMAGES -----------------------------
-
-@app.get("/api/get-all-images")
-async def get_all_images():
-    try:
-        images = db_get_all_images()
-        if not images:
-            raise HTTPException(status_code=404, detail="No images found")
-        return images
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- GET IMAGE BY ID -----------------------------
-
-@app.get("/api/get-image/{image_id}")
-async def get_image(image_id: str):
-    try:
-        file_data = db_get_image(image_id)
-        if not file_data:
-            raise HTTPException(status_code=404, detail="Image not found")
-        return StreamingResponse(BytesIO(file_data), media_type="image/jpeg")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- GET IMAGE WITH DETAILS -----------------------------
-
-@app.get("/api/get-image-details/{image_id}")
-async def get_image_with_details_api(image_id: str):
-    try:
-        document_data = db_get_image_with_details(image_id)
-        if not document_data:
-            raise HTTPException(status_code=404, detail="Image or document not found")
-        return {
-            "image_id": image_id,
-            "document_details": document_data
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- UPLOAD IMAGES -----------------------------
-
-@app.post("/api/upload-images")
-async def upload_images(
-    folder_path: str = Form(...),
-    metadata_folder: str = Form(None),
-    exact_match: bool = Form(False)
-):
-    try:
-        if not os.path.exists(folder_path):
-            raise HTTPException(status_code=400, detail="Folder not found")
-
-        if metadata_folder and not os.path.exists(metadata_folder):
-            raise HTTPException(status_code=400, detail="Metadata folder not found")
-        
-        response = upload_images_from_folder(folder_path, metadata_folder, exact_match)
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- RELATIONSHIPS -----------------------------
-
-@app.get("/api/relationships")
-async def get_relationships(field: str = None, value: str = None):
-    try:
-        filter_by = {field: value} if field and value else None
-        relationships = get_metadata_image_relationships(filter_by)
-
-        if not relationships:
-            raise HTTPException(status_code=404, detail="No relationships found")
-        return {
-            "count": len(relationships),
-            "relationships": relationships
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- BASE64 Image with Metadata -----------------------------
-
-@app.get("/api/image-with-metadata/{image_id}") 
-async def get_image_with_metadata(image_id: str):
-    try:
-        file_data = db_get_image(image_id)
-        if not file_data:
-            raise HTTPException(status_code=404, detail="Image not found")
-
-        document = db_get_image_with_details(image_id)
-
-        image_base64 = base64.b64encode(file_data).decode('utf-8')
-
-        return {
-            "image_id": image_id,
-            "filename": document.get("filename", "unknown") if document else "unknown",
-            "image_data": image_base64,
-            "content_type": "image/jpeg",
-            "has_metadata": bool(document),
-            "metadata": document if document else {}
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ---------- Model Definition ---------- #
-def resnet50_embedding(in_channels=3, n_classes=17, dropout=0.5, weights=None):
-    model = models.resnet50(weights=weights)
-    model.conv1 = nn.Conv2d(in_channels, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-    model.fc = nn.Sequential(
-        nn.BatchNorm1d(2048),
-        nn.Dropout(p=dropout),
-        nn.Linear(2048, 512, bias=False),
-        nn.ReLU(inplace=True),
-        nn.BatchNorm1d(512),
-        nn.Dropout(p=dropout),
-        nn.Linear(512, 64, bias=False),
-        nn.ReLU(inplace=True),
-        nn.BatchNorm1d(64),
-        nn.Dropout(p=dropout),
-        nn.Linear(64, n_classes, bias=True)
-    )
-    return model
-
-def initialize_model(device):
-    model = resnet50_embedding()
-    model = model.to(device)
-    model.eval()
-    model.fc = nn.Sequential(*list(model.fc.children())[:6])  # Take up to 512 dimension
-    print("✅ Model initialized and ready.")
-    return model
-
-# ---------- Image Loader From LMDB ---------- #
-def process_lmdb_documents(batch_docs, transform):
-    image_tensors = []
-    valid_metadata = []
-
-    def load_image(doc):
-        try:
-            img_data = db_get_image(doc["image_id"])
-            img = Image.open(BytesIO(img_data)).convert("RGB")
-            img_tensor = transform(img)
-            return img_tensor, {
-                "image_id": doc["image_id"],
-                "filename": doc.get("filename", "unknown"),
-                "category": doc.get("category", "Unknown")
-            }
-        except Exception as e:
-            print(f"Error loading image {doc.get('image_id', 'unknown')}: {str(e)}")
-            return None, None
-
-    with ThreadPoolExecutor(max_workers=64) as executor:
-        results = list(executor.map(load_image, batch_docs))
-
-    for img_tensor, meta in results:
-        if img_tensor is not None:
-            image_tensors.append(img_tensor)
-            valid_metadata.append(meta)
-
-    return image_tensors, valid_metadata
-
-# ---------- Embedding Extraction ---------- #
-def extract_embeddings_from_lmdb(model, device, batch_size, lmdb_batch_size):
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
-    start_time = time.time()
-    documents = db_get_all_documents()
-    print(f"✅ Retrieved {len(documents)} documents from LMDB in {time.time() - start_time:.2f} seconds.")
-
-    all_embeddings = []
-    all_metadata = []
-
-    for batch_start in tqdm(range(0, len(documents), lmdb_batch_size), desc="Processing LMDB batches"):
-        batch_docs = documents[batch_start: batch_start + lmdb_batch_size]
-        image_tensors, metadata = process_lmdb_documents(batch_docs, transform)
-
-        if image_tensors:
-            batch_tensor = torch.stack(image_tensors)
-            batch_tensor = batch_tensor.to(device, non_blocking=True)
-
-            with torch.cuda.amp.autocast():
-                with torch.no_grad():
-                    feats = model(batch_tensor)
-            
-            all_embeddings.append(feats.cpu().numpy())
-            all_metadata.extend(metadata)
-
-            torch.cuda.empty_cache()
-
-    if not all_embeddings:
-        raise Exception("No valid images found in LMDB.")
-
-    embeddings = np.vstack(all_embeddings)
-    print(f"✅ Extracted embeddings shape: {embeddings.shape}")
-    return embeddings, all_metadata
-
-# ---------- t-SNE Computation ---------- #
-def compute_tsne(embeddings, output_dim=2, perplexity=30, n_iter=1000):
-    print("🚀 Running cuML t-SNE...")
-    start_time = time.time()
-    embeddings_gpu = cp.asarray(embeddings)
-
-    tsne = TSNE(
-        n_components=output_dim,
-        perplexity=perplexity,
-        n_iter=n_iter,
-        verbose=1,
-        method="barnes_hut",
-        num_workers=16
-    )
-    tsne_result_gpu = tsne.fit_transform(embeddings_gpu)
-
-    tsne_result = cp.asnumpy(tsne_result_gpu)
-    print(f"✅ t-SNE completed in {time.time() - start_time:.2f} seconds.")
-    return tsne_result
-
-# ---------- Full Pipeline ---------- #
-def generate_tsne_from_lmdb(batch_size=512, output_dim=2, perplexity=30, device_str="cuda", lmdb_batch_size=2000):
-    device = torch.device(device_str)
-    print(f"Using device: {device}")
-
-    model = initialize_model(device)
-    embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size, lmdb_batch_size)
-    tsne_result = compute_tsne(embeddings, output_dim=output_dim, perplexity=perplexity)
-
-    return tsne_result, metadata
-
-@app.get("/api/save_all_embeddings")
-async def save_all_embeddings():
-    output_embeddings_path="./output/all_embeddings.npy"
-    output_metadata_path="./output/all_metadata.json"
-    device = torch.device("cuda:0")
-    model = initialize_model(device)
-    embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size=512, lmdb_batch_size=2000)
-
-    np.save(output_embeddings_path, embeddings)
-    with open(output_metadata_path, "w") as f:
-        json.dump(metadata, f, indent=4)
-
-    print(f"✅ Saved embeddings to {output_embeddings_path} and metadata to {output_metadata_path}")
-
-# save_all_embeddings()
-#---------- Generate t-SNE ---------- #
- 
-@app.get("/api/dimensionality-reduction/{method}")
-async def dimensionality_reduction(method: str):
-
-    """
-    Perform dimensionality reduction using either UMAP or t-SNE.
-    Args:
-        method (str): Dimensionality reduction method ("tsne" or "umap")
-    Returns:
-        JSONResponse: Contains the reduced coordinates and metadata
-    """
-    try:
-        if method.lower() not in ["tsne", "umap"]:
-            raise HTTPException(status_code=400, detail="Method must be either 'tsne' or 'umap'")
-        
-        # Perform dimensionality reduction
-        if method.lower() == "tsne":
-            metadata_path = f"./output/{method}_metadata.json"
-        else:  # umap
-            metadata_path = f"./output/{method}_metadata.json"
-        
-        # Prepare response
-        with open(metadata_path, "r") as file:
-            json_data = json.load(file)
-            
-        # Calculate sprite sheet dimensions
-        num_images = len(json_data)
-        sprite_dim = int(np.ceil(np.sqrt(num_images)))
-        sprite_width = 32  # Each sprite is 32x32 pixels
-        sprite_height = 32
-        
-        return JSONResponse({
-            "spritePath": {
-                "columns": sprite_dim,
-                "rows": sprite_dim,
-                "width": sprite_dim * sprite_width,
-                "height": sprite_dim * sprite_height,
-                "sprite_width": sprite_width,
-                "sprite_height": sprite_height,
-                "url": "/output/sprite_sheet.png"
-            },
-            "itemsPath": json_data
-        })
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ---------- API Endpoint ---------- #
-@app.get("/api/make_tsne")
-async def make_tsne():
-    try:
-        # Check for existing t-SNE results
-        output_dir = "./output"
-        sprite_path = f"{output_dir}/sprite_sheet.png"
-        metadata_path = f"{output_dir}/tsne_metadata.json"
-
-        # If both files exist and are not empty, return existing results
-        if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0 and os.path.getsize(metadata_path) > 0:
-            with open(metadata_path, "r") as file:
-                json_data = json.load(file)
-
-            sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
-            sprite_width = 32
-            sprite_height = 32
-
-            return JSONResponse({
-                "spritePath": {
-                    "columns": sprite_dim,
-                    "rows": sprite_dim,
-                    "width": sprite_dim * sprite_width,
-                    "height": sprite_dim * sprite_height,
-                    "sprite_width": sprite_width,
-                    "sprite_height": sprite_height,
-                    "url": "/output/sprite_sheet.png"
-                },
-                "itemsPath": json_data
-            })
-
-        # If files don't exist or are empty, generate new t-SNE
-        start_time = time.time()
-        tsne_result, metadata = generate_tsne_from_lmdb()
-        method = "tsne"
-        end_time = time.time()
-
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Create sprite + metadata
-        result = create_sprite_sheet_from_mongodb(
-            output_sprite=sprite_path,
-            output_json=metadata_path,
-            reduction_method=method,
-            coordinates=tsne_result,
-            metadata=metadata
-        )
-
-        if not result:
-            raise HTTPException(status_code=500, detail="Failed to generate sprite sheet")
-
-        with open(metadata_path, "r") as file:
-            json_data = json.load(file)
-
-        sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
-        sprite_width = 32
-        sprite_height = 32
-
-        return JSONResponse({
-            "spritePath": {
-                "columns": sprite_dim,
-                "rows": sprite_dim,
-                "width": sprite_dim * sprite_width,
-                "height": sprite_dim * sprite_height,
-                "sprite_width": sprite_width,
-                "sprite_height": sprite_height,
-                "url": "/output/sprite_sheet.png"
-            },
-            "itemsPath": json_data
-        })
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-class TSNESubsetRequest(BaseModel):
-    image_ids: List[str]
-@app.post("/api/make_tsne_subset_fast")
-async def make_tsne_subset_fast(payload: TSNESubsetRequest):
-    try:
-        image_ids = payload.image_ids
-
-        if not image_ids:
-            raise HTTPException(status_code=400, detail="No image_ids provided.")
-
-        # Load precomputed data
-        embeddings = np.load("./output/all_embeddings.npy")
-        with open("./output/all_metadata.json", "r") as f:
-            all_metadata = json.load(f)
-
-        # Map image_id to index
-        id_to_index = {meta["image_id"]: idx for idx, meta in enumerate(all_metadata)}
-        
-        selected_indices = [id_to_index[iid] for iid in image_ids if iid in id_to_index]
-        if not selected_indices:
-            raise HTTPException(status_code=404, detail="None of the requested image_ids found in metadata.")
-
-        selected_embeddings = embeddings[selected_indices]
-        selected_metadata = [all_metadata[i] for i in selected_indices]
-
-        # Run t-SNE
-        perplexity = min(30, len(selected_embeddings) - 1)
-        tsne_result = compute_tsne(selected_embeddings, output_dim=2, perplexity=perplexity)
-
-        # Save sprite + metadata
-        output_dir = "./output"
-        os.makedirs(output_dir, exist_ok=True)
-        sprite_path = f"{output_dir}/sprite_sheet_subset_fast.png"
-        metadata_path = f"{output_dir}/tsne_subset_fast_metadata.json"
-
-        result = create_sprite_sheet_from_mongodb(
-            output_sprite=sprite_path,
-            output_json=metadata_path,
-            reduction_method="tsne_subset_fast",
-            coordinates=tsne_result,
-            metadata=selected_metadata
-        )
-
-        with open(metadata_path, "r") as file:
-            json_data = json.load(file)
-
-        sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
-        sprite_width = 32
-        sprite_height = 32
-
-        return JSONResponse({
-            "spritePath": {
-                "columns": sprite_dim,
-                "rows": sprite_dim,
-                "width": sprite_dim * sprite_width,
-                "height": sprite_dim * sprite_height,
-                "sprite_width": sprite_width,
-                "sprite_height": sprite_height,
-                "url": "/output/sprite_sheet_subset_fast.png"
-            },
-            "itemsPath": json_data
-        })
-
-    except Exception as e:
-        print(f"Error in make_tsne_subset_fast: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-def create_sprite_sheet_from_mongodb(output_sprite, output_json, reduction_method, coordinates, metadata):
+# ----------------------------- CREATE SPRITE SHEET FROM MONGODB -----------------------------
+def create_sprite_sheet(output_sprite, output_json, reduction_method, coordinates, metadata):
     """
     Generates a sprite sheet and JSON metadata from coordinates and metadata list.
     Each thumbnail is 32x32 pixels.
@@ -569,6 +91,442 @@ def create_sprite_sheet_from_mongodb(output_sprite, output_json, reduction_metho
 
     return True
 
+
+# ---------- Model Definition ---------- #
+def resnet50_embedding(in_channels=3, n_classes=17, dropout=0.5, weights=None):
+    model = models.resnet50(weights=weights)
+    model.conv1 = nn.Conv2d(in_channels, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+    model.fc = nn.Sequential(
+        nn.BatchNorm1d(2048),
+        nn.Dropout(p=dropout),
+        nn.Linear(2048, 512, bias=False),
+        nn.ReLU(inplace=True),
+        nn.BatchNorm1d(512),
+        nn.Dropout(p=dropout),
+        nn.Linear(512, 64, bias=False),
+        nn.ReLU(inplace=True),
+        nn.BatchNorm1d(64),
+        nn.Dropout(p=dropout),
+        nn.Linear(64, n_classes, bias=True)
+    )
+    return model
+
+# ----------------------------- INITIALIZE MODEL -----------------------------
+def initialize_model(device):
+    model = resnet50_embedding()
+    model = model.to(device)
+    model.eval()
+    model.fc = nn.Sequential(*list(model.fc.children())[:6])  # Take up to 512 dimension
+    print("✅ Model initialized and ready.")
+    return model
+
+# ----------------------------- PROCESS LMDB DOCUMENTS -----------------------------
+def process_lmdb_documents(batch_docs, transform):
+    image_tensors = []
+    valid_metadata = []
+
+    def load_image(doc):
+        try:
+            img_data = db_get_image(doc["image_id"])
+            img = Image.open(BytesIO(img_data)).convert("RGB")
+            img_tensor = transform(img)
+            return img_tensor, {
+                "image_id": doc["image_id"],
+                "filename": doc.get("filename", "unknown"),
+                "category": doc.get("category", "Unknown")
+            }
+        except Exception as e:
+            print(f"Error loading image {doc.get('image_id', 'unknown')}: {str(e)}")
+            return None, None
+
+    with ThreadPoolExecutor(max_workers=64) as executor:
+        results = list(executor.map(load_image, batch_docs))
+
+    for img_tensor, meta in results:
+        if img_tensor is not None:
+            image_tensors.append(img_tensor)
+            valid_metadata.append(meta)
+
+    return image_tensors, valid_metadata
+
+# ----------------------------- EXTRACT EMBEDDINGS FROM LMDB -----------------------------
+def extract_embeddings_from_lmdb(model, device, batch_size, lmdb_batch_size):
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    start_time = time.time()
+    documents = db_get_all_documents()
+    print(f"✅ Retrieved {len(documents)} documents from LMDB in {time.time() - start_time:.2f} seconds.")
+
+    all_embeddings = []
+    all_metadata = []
+
+    for batch_start in tqdm(range(0, len(documents), lmdb_batch_size), desc="Processing LMDB batches"):
+        batch_docs = documents[batch_start: batch_start + lmdb_batch_size]
+        image_tensors, metadata = process_lmdb_documents(batch_docs, transform)
+
+        if image_tensors:
+            batch_tensor = torch.stack(image_tensors)
+            batch_tensor = batch_tensor.to(device, non_blocking=True)
+
+            with torch.cuda.amp.autocast():
+                with torch.no_grad():
+                    feats = model(batch_tensor)
+            
+            all_embeddings.append(feats.cpu().numpy())
+            all_metadata.extend(metadata)
+
+            torch.cuda.empty_cache()
+
+    if not all_embeddings:
+        raise Exception("No valid images found in LMDB.")
+
+    embeddings = np.vstack(all_embeddings)
+    print(f"✅ Extracted embeddings shape: {embeddings.shape}")
+    return embeddings, all_metadata
+
+# ----------------------------- COMPUTE T-SNE -----------------------------
+def compute_tsne(embeddings, output_dim=2, perplexity=30, n_iter=1000):
+    print("🚀 Running cuML t-SNE...")
+    start_time = time.time()
+    embeddings_gpu = cp.asarray(embeddings)
+
+    tsne = TSNE(
+        n_components=output_dim,
+        perplexity=perplexity,
+        n_iter=n_iter,
+        verbose=1,
+        method="barnes_hut",
+        num_workers=16
+    )
+    tsne_result_gpu = tsne.fit_transform(embeddings_gpu)
+
+    tsne_result = cp.asnumpy(tsne_result_gpu)
+    print(f"✅ t-SNE completed in {time.time() - start_time:.2f} seconds.")
+    return tsne_result
+
+# ----------------------------- GENERATE T-SNE FROM LMDB -----------------------------
+def generate_tsne_from_lmdb(batch_size=512, output_dim=2, perplexity=30, device_str="cuda", lmdb_batch_size=2000):
+    device = torch.device(device_str)
+    print(f"Using device: {device}")
+
+    model = initialize_model(device)
+    embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size, lmdb_batch_size)
+    tsne_result = compute_tsne(embeddings, output_dim=output_dim, perplexity=perplexity)
+
+    return tsne_result, metadata
+# ----------------------------- COMPUTE UMAP -----------------------------
+
+def compute_umap(embeddings, output_dim=2, n_neighbors=15, min_dist=0.1):
+    print("🚀 Running cuML UMAP...")
+    start_time = time.time()
+    embeddings_gpu = cp.asarray(embeddings)
+
+    reducer = UMAP(
+        n_components=output_dim,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        verbose=True
+    )
+    umap_result_gpu = reducer.fit_transform(embeddings_gpu)
+    umap_result = cp.asnumpy(umap_result_gpu)
+
+    print(f"✅ UMAP completed in {time.time() - start_time:.2f} seconds.")
+    return umap_result
+
+# ----------------------------- GENERATE UMAP FROM LMDB -----------------------------
+def generate_umap_from_lmdb(batch_size=512, output_dim=2, device_str="cuda", lmdb_batch_size=2000):
+    device = torch.device(device_str)
+    print(f"Using device: {device}")
+
+    model = initialize_model(device)
+    embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size, lmdb_batch_size)
+    umap_result = compute_umap(embeddings, output_dim=output_dim)
+
+    return umap_result, metadata
+
+
+# ----------------------------- STATIC FILES -----------------------------
+app.mount("/api/output", StaticFiles(directory="api/output"), name="/api/output")
+
+# ----------------------------- ROOT -----------------------------
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/docs")
+
+# ----------------------------- GET ALL DOCUMENTS -----------------------------
+@app.get("/api/read")
+async def get_all_documents():
+    try:
+        documents = db_get_all_documents()
+        if not documents:
+            raise HTTPException(status_code=404, detail="No documents found")
+        return documents
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- GET SINGLE DOCUMENT -----------------------------
+@app.get("/api/read/{field}/{value}")
+async def get_document_by_field(field: str, value: str):
+    try:
+        document = db_get_document_by_field(field, value)
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return document
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- DELETE DOCUMENT -----------------------------
+@app.delete("/api/delete/{field}/{value}")
+async def delete_document(field: str, value: str):
+    try:
+        response = db_delete_document(field, value)
+        if not response:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- GET ALL IMAGES -----------------------------
+@app.get("/api/get-all-images")
+async def get_all_images():
+    try:
+        images = db_get_all_images()
+        if not images:
+            raise HTTPException(status_code=404, detail="No images found")
+        return images
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- GET IMAGE BY ID -----------------------------
+@app.get("/api/get-image/{image_id}")
+async def get_image(image_id: str):
+    try:
+        file_data = db_get_image(image_id)
+        if not file_data:
+            raise HTTPException(status_code=404, detail="Image not found")
+        return StreamingResponse(BytesIO(file_data), media_type="image/jpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- GET IMAGE WITH DETAILS -----------------------------
+@app.get("/api/get-image-details/{image_id}")
+async def get_image_with_details_api(image_id: str):
+    try:
+        document_data = db_get_image_with_details(image_id)
+        if not document_data:
+            raise HTTPException(status_code=404, detail="Image or document not found")
+        return {
+            "image_id": image_id,
+            "document_details": document_data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- UPLOAD IMAGES -----------------------------
+@app.post("/api/upload-images")
+async def upload_images(
+    folder_path: str = Form(...),
+    metadata_folder: str = Form(None),
+    exact_match: bool = Form(False)
+):
+    try:
+        if not os.path.exists(folder_path):
+            raise HTTPException(status_code=400, detail="Folder not found")
+
+        if metadata_folder and not os.path.exists(metadata_folder):
+            raise HTTPException(status_code=400, detail="Metadata folder not found")
+        
+        response = upload_images_from_folder(folder_path, metadata_folder, exact_match)
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- RELATIONSHIPS -----------------------------
+@app.get("/api/relationships")
+async def get_relationships(field: str = None, value: str = None):
+    try:
+        filter_by = {field: value} if field and value else None
+        relationships = get_metadata_image_relationships(filter_by)
+
+        if not relationships:
+            raise HTTPException(status_code=404, detail="No relationships found")
+        return {
+            "count": len(relationships),
+            "relationships": relationships
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- BASE64 Image with Metadata -----------------------------
+@app.get("/api/image-with-metadata/{image_id}") 
+async def get_image_with_metadata(image_id: str):
+    try:
+        file_data = db_get_image(image_id)
+        if not file_data:
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        document = db_get_image_with_details(image_id)
+
+        image_base64 = base64.b64encode(file_data).decode('utf-8')
+
+        return {
+            "image_id": image_id,
+            "filename": document.get("filename", "unknown") if document else "unknown",
+            "image_data": image_base64,
+            "content_type": "image/jpeg",
+            "has_metadata": bool(document),
+            "metadata": document if document else {}
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- SAVE ALL EMBEDDINGS -----------------------------
+@app.get("/api/save_all_embeddings")
+async def save_all_embeddings():
+    output_embeddings_path="./output/all_embeddings.npy"
+    output_metadata_path="./output/all_metadata.json"
+    device = torch.device("cuda:0")
+    model = initialize_model(device)
+    embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size=512, lmdb_batch_size=2000)
+
+    np.save(output_embeddings_path, embeddings)
+    with open(output_metadata_path, "w") as f:
+        json.dump(metadata, f, indent=4)
+
+    print(f"✅ Saved embeddings to {output_embeddings_path} and metadata to {output_metadata_path}")
+
+# ----------------------------- DIMENSIONALITY REDUCTION -----------------------------
+@app.get("/api/dimensionality-reduction/{method}")
+async def dimensionality_reduction(method: str):
+
+    """
+    Perform dimensionality reduction using either UMAP or t-SNE.
+    Args:
+        method (str): Dimensionality reduction method ("tsne" or "umap")
+    Returns:
+        JSONResponse: Contains the reduced coordinates and metadata
+    """
+    try:
+        if method.lower() not in ["tsne", "umap"]:
+            raise HTTPException(status_code=400, detail="Method must be either 'tsne' or 'umap'")
+        
+        # Perform dimensionality reduction
+        if method.lower() == "tsne":
+            metadata_path = f"./output/{method}_metadata.json"
+        else:  # umap
+            metadata_path = f"./output/{method}_metadata.json"
+        
+        # Prepare response
+        with open(metadata_path, "r") as file:
+            json_data = json.load(file)
+            
+        # Calculate sprite sheet dimensions
+        num_images = len(json_data)
+        sprite_dim = int(np.ceil(np.sqrt(num_images)))
+        sprite_width = 32  # Each sprite is 32x32 pixels
+        sprite_height = 32
+        
+        return JSONResponse({
+            "spritePath": {
+                "columns": sprite_dim,
+                "rows": sprite_dim,
+                "width": sprite_dim * sprite_width,
+                "height": sprite_dim * sprite_height,
+                "sprite_width": sprite_width,
+                "sprite_height": sprite_height,
+                "url": "/output/sprite_sheet.png"
+            },
+            "itemsPath": json_data
+        })
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- MAKE T-SNE -----------------------------
+@app.get("/api/make_tsne")
+async def make_tsne():
+    try:
+        # Check for existing t-SNE results
+        output_dir = "./output"
+        sprite_path = f"{output_dir}/sprite_sheet.png"
+        metadata_path = f"{output_dir}/tsne_metadata.json"
+
+        # If both files exist and are not empty, return existing results
+        if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0 and os.path.getsize(metadata_path) > 0:
+            with open(metadata_path, "r") as file:
+                json_data = json.load(file)
+
+            sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
+            sprite_width = 32
+            sprite_height = 32
+
+            return JSONResponse({
+                "spritePath": {
+                    "columns": sprite_dim,
+                    "rows": sprite_dim,
+                    "width": sprite_dim * sprite_width,
+                    "height": sprite_dim * sprite_height,
+                    "sprite_width": sprite_width,
+                    "sprite_height": sprite_height,
+                    "url": "/output/sprite_sheet.png"
+                },
+                "itemsPath": json_data
+            })
+
+        # If files don't exist or are empty, generate new t-SNE
+        start_time = time.time()
+        tsne_result, metadata = generate_tsne_from_lmdb()
+        method = "tsne"
+        end_time = time.time()
+
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Create sprite + metadata
+        result = create_sprite_sheet(
+            output_sprite=sprite_path,
+            output_json=metadata_path,
+            reduction_method=method,
+            coordinates=tsne_result,
+            metadata=metadata
+        )
+
+        if not result:
+            raise HTTPException(status_code=500, detail="Failed to generate sprite sheet")
+
+        with open(metadata_path, "r") as file:
+            json_data = json.load(file)
+
+        sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
+        sprite_width = 32
+        sprite_height = 32
+
+        return JSONResponse({
+            "spritePath": {
+                "columns": sprite_dim,
+                "rows": sprite_dim,
+                "width": sprite_dim * sprite_width,
+                "height": sprite_dim * sprite_height,
+                "sprite_width": sprite_width,
+                "sprite_height": sprite_height,
+                "url": "/output/sprite_sheet.png"
+            },
+            "itemsPath": json_data
+        })
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- MAKE T-SNE SUBSET -----------------------------
+class TSNESubsetRequest(BaseModel):
+    image_ids: List[str]
+
+# ----------------------------- MAKE T-SNE SUBSET -----------------------------
 @app.post("/api/make_tsne_subset")
 async def make_tsne_subset(payload: TSNESubsetRequest):
     try:
@@ -611,4 +569,115 @@ async def make_tsne_subset(payload: TSNESubsetRequest):
 
     except Exception as e:
         print(f"Error in make_tsne_subset: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- MAKE UMAP -----------------------------
+@app.get("/api/make_umap")
+async def make_umap():
+    try:
+        output_dir = "./output"
+        sprite_path = f"{output_dir}/sprite_sheet_umap.png"
+        metadata_path = f"{output_dir}/umap_metadata.json"
+
+        if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0:
+            with open(metadata_path, "r") as f:
+                json_data = json.load(f)
+
+            sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
+            sprite_width = 32
+            sprite_height = 32
+
+            return JSONResponse({
+                "spritePath": {
+                    "columns": sprite_dim,
+                    "rows": sprite_dim,
+                    "width": sprite_dim * sprite_width,
+                    "height": sprite_dim * sprite_height,
+                    "sprite_width": sprite_width,
+                    "sprite_height": sprite_height,
+                    "url": "/output/sprite_sheet_umap.png"
+                },
+                "itemsPath": json_data
+            })
+
+        # Generate embeddings + UMAP
+        umap_result, metadata = generate_umap_from_lmdb()
+        method = "umap"
+        os.makedirs(output_dir, exist_ok=True)
+
+        result = create_sprite_sheet(
+            output_sprite=sprite_path,
+            output_json=metadata_path,
+            reduction_method=method,
+            coordinates=umap_result,
+            metadata=metadata
+        )
+
+        if not result:
+            raise HTTPException(status_code=500, detail="Failed to generate UMAP sprite sheet")
+
+        with open(metadata_path, "r") as f:
+            json_data = json.load(f)
+
+        sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
+        sprite_width = 32
+        sprite_height = 32
+
+        return JSONResponse({
+            "spritePath": {
+                "columns": sprite_dim,
+                "rows": sprite_dim,
+                "width": sprite_dim * sprite_width,
+                "height": sprite_dim * sprite_height,
+                "sprite_width": sprite_width,
+                "sprite_height": sprite_height,
+                "url": "/output/sprite_sheet_umap.png"
+            },
+            "itemsPath": json_data
+        })
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------------------- MAKE UMAP SUBSET -----------------------------
+@app.post("/api/make_umap_subset")
+async def make_umap_subset(payload: TSNESubsetRequest):
+    try:
+        image_ids = payload.image_ids
+        if not image_ids:
+            raise HTTPException(status_code=400, detail="No image_ids provided.")
+
+        metadata_path = "./output/umap_metadata.json"
+        sprite_path = "/output/sprite_sheet_umap.png"
+
+        if not os.path.exists(metadata_path):
+            raise HTTPException(status_code=404, detail="Full UMAP metadata not found.")
+
+        with open(metadata_path, "r") as file:
+            full_metadata = json.load(file)
+
+        filtered_metadata = [item for item in full_metadata if item["image_id"] in image_ids]
+
+        if not filtered_metadata:
+            raise HTTPException(status_code=404, detail="No matching image_ids found in UMAP metadata.")
+
+        sprite_dim = int(np.ceil(np.sqrt(len(full_metadata))))
+        sprite_width = 32
+        sprite_height = 32
+
+        return JSONResponse({
+            "spritePath": {
+                "columns": sprite_dim,
+                "rows": sprite_dim,
+                "width": sprite_dim * sprite_width,
+                "height": sprite_dim * sprite_height,
+                "sprite_width": sprite_width,
+                "sprite_height": sprite_height,
+                "url": sprite_path
+            },
+            "itemsPath": filtered_metadata
+        })
+
+    except Exception as e:
+        print(f"Error in make_umap_subset: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
