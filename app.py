@@ -448,18 +448,20 @@ async def dimensionality_reduction(method: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ----------------------------- MAKE T-SNE -----------------------------
-@app.get("/api/make_tsne")
-async def make_tsne():
+@app.get("/api/make_reduction/{method}")
+async def make_reduction(method: str):
     try:
-        # Check for existing t-SNE results
-        output_dir = "./output"
-        sprite_path = f"{output_dir}/sprite_sheet.png"
-        metadata_path = f"{output_dir}/tsne_metadata.json"
+        method = method.lower()
+        if method not in ["tsne", "umap"]:
+            raise HTTPException(status_code=400, detail="Invalid method. Use 'tsne' or 'umap'.")
 
-        # If both files exist and are not empty, return existing results
-        if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0 and os.path.getsize(metadata_path) > 0:
-            with open(metadata_path, "r") as file:
-                json_data = json.load(file)
+        output_dir = "./output"
+        sprite_path = f"{output_dir}/sprite_sheet_{method}.png" if method == "umap" else f"{output_dir}/sprite_sheet.png"
+        metadata_path = f"{output_dir}/{method}_metadata.json"
+
+        if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0:
+            with open(metadata_path, "r") as f:
+                json_data = json.load(f)
 
             sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
             sprite_width = 32
@@ -478,143 +480,24 @@ async def make_tsne():
                 "itemsPath": json_data
             })
 
-        # If files don't exist or are empty, generate new t-SNE
-        start_time = time.time()
-        tsne_result, metadata = generate_tsne_from_lmdb()
-        method = "tsne"
-        end_time = time.time()
+        # Generate embeddings and reduction
+        if method == "tsne":
+            result_coords, metadata = generate_tsne_from_lmdb()
+        else:
+            result_coords, metadata = generate_umap_from_lmdb()
 
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Create sprite + metadata
-        result = create_sprite_sheet(
-            output_sprite=sprite_path,
-            output_json=metadata_path,
-            reduction_method=method,
-            coordinates=tsne_result,
-            metadata=metadata
-        )
-
-        if not result:
-            raise HTTPException(status_code=500, detail="Failed to generate sprite sheet")
-
-        with open(metadata_path, "r") as file:
-            json_data = json.load(file)
-
-        sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
-        sprite_width = 32
-        sprite_height = 32
-
-        return JSONResponse({
-            "spritePath": {
-                "columns": sprite_dim,
-                "rows": sprite_dim,
-                "width": sprite_dim * sprite_width,
-                "height": sprite_dim * sprite_height,
-                "sprite_width": sprite_width,
-                "sprite_height": sprite_height,
-                "url": "/output/sprite_sheet.png"
-            },
-            "itemsPath": json_data
-        })
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- MAKE T-SNE SUBSET -----------------------------
-class TSNESubsetRequest(BaseModel):
-    image_ids: List[str]
-
-# ----------------------------- MAKE T-SNE SUBSET -----------------------------
-@app.post("/api/make_tsne_subset")
-async def make_tsne_subset(payload: TSNESubsetRequest):
-    try:
-        image_ids = payload.image_ids
-        if not image_ids:
-            raise HTTPException(status_code=400, detail="No image_ids provided.")
-
-        metadata_path = "./output/tsne_metadata.json"
-        sprite_path = "/output/sprite_sheet.png"  # Relative path exposed via StaticFiles
-
-        if not os.path.exists(metadata_path):
-            raise HTTPException(status_code=404, detail="Full metadata not found.")
-
-        # Load full metadata
-        with open(metadata_path, "r") as file:
-            full_metadata = json.load(file)
-
-        # Filter for selected image_ids
-        filtered_metadata = [item for item in full_metadata if item["image_id"] in image_ids]
-
-        if not filtered_metadata:
-            raise HTTPException(status_code=404, detail="No matching image_ids found in full metadata.")
-
-        sprite_dim = int(np.ceil(np.sqrt(len(full_metadata))))
-        sprite_width = 32
-        sprite_height = 32
-
-        return JSONResponse({
-            "spritePath": {
-                "columns": sprite_dim,
-                "rows": sprite_dim,
-                "width": sprite_dim * sprite_width,
-                "height": sprite_dim * sprite_height,
-                "sprite_width": sprite_width,
-                "sprite_height": sprite_height,
-                "url": sprite_path
-            },
-            "itemsPath": filtered_metadata
-        })
-
-    except Exception as e:
-        print(f"Error in make_tsne_subset: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ----------------------------- MAKE UMAP -----------------------------
-@app.get("/api/make_umap")
-async def make_umap():
-    try:
-        output_dir = "./output"
-        sprite_path = f"{output_dir}/sprite_sheet_umap.png"
-        metadata_path = f"{output_dir}/umap_metadata.json"
-
-        if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0:
-            with open(metadata_path, "r") as f:
-                json_data = json.load(f)
-
-            sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
-            sprite_width = 32
-            sprite_height = 32
-
-            return JSONResponse({
-                "spritePath": {
-                    "columns": sprite_dim,
-                    "rows": sprite_dim,
-                    "width": sprite_dim * sprite_width,
-                    "height": sprite_dim * sprite_height,
-                    "sprite_width": sprite_width,
-                    "sprite_height": sprite_height,
-                    "url": "/output/sprite_sheet_umap.png"
-                },
-                "itemsPath": json_data
-            })
-
-        # Generate embeddings + UMAP
-        umap_result, metadata = generate_umap_from_lmdb()
-        method = "umap"
         os.makedirs(output_dir, exist_ok=True)
 
         result = create_sprite_sheet(
             output_sprite=sprite_path,
             output_json=metadata_path,
             reduction_method=method,
-            coordinates=umap_result,
+            coordinates=result_coords,
             metadata=metadata
         )
 
         if not result:
-            raise HTTPException(status_code=500, detail="Failed to generate UMAP sprite sheet")
+            raise HTTPException(status_code=500, detail=f"Failed to generate {method.upper()} sprite sheet")
 
         with open(metadata_path, "r") as f:
             json_data = json.load(f)
@@ -631,7 +514,7 @@ async def make_umap():
                 "height": sprite_dim * sprite_height,
                 "sprite_width": sprite_width,
                 "sprite_height": sprite_height,
-                "url": "/output/sprite_sheet_umap.png"
+                "url": f"/output/sprite_sheet.png"
             },
             "itemsPath": json_data
         })
@@ -639,19 +522,27 @@ async def make_umap():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ----------------------------- MAKE UMAP SUBSET -----------------------------
-@app.post("/api/make_umap_subset")
-async def make_umap_subset(payload: TSNESubsetRequest):
+# ----------------------------- MAKE T-SNE SUBSET -----------------------------
+class TSNESubsetRequest(BaseModel):
+    image_ids: List[str]
+
+# ----------------------------- MAKE T-SNE SUBSET -----------------------------
+@app.post("/api/make_reduction_subset/{method}")
+async def make_reduction_subset(method: str, payload: TSNESubsetRequest):
     try:
+        method = method.lower()
+        if method not in ["tsne", "umap"]:
+            raise HTTPException(status_code=400, detail="Invalid method. Use 'tsne' or 'umap'.")
+
         image_ids = payload.image_ids
         if not image_ids:
             raise HTTPException(status_code=400, detail="No image_ids provided.")
 
-        metadata_path = "./output/umap_metadata.json"
-        sprite_path = "/output/sprite_sheet_umap.png"
+        metadata_path = f"./output/{method}_metadata.json"
+        sprite_path = f"/output/sprite_sheet.png"
 
         if not os.path.exists(metadata_path):
-            raise HTTPException(status_code=404, detail="Full UMAP metadata not found.")
+            raise HTTPException(status_code=404, detail=f"{method.upper()} metadata not found.")
 
         with open(metadata_path, "r") as file:
             full_metadata = json.load(file)
@@ -659,7 +550,7 @@ async def make_umap_subset(payload: TSNESubsetRequest):
         filtered_metadata = [item for item in full_metadata if item["image_id"] in image_ids]
 
         if not filtered_metadata:
-            raise HTTPException(status_code=404, detail="No matching image_ids found in UMAP metadata.")
+            raise HTTPException(status_code=404, detail=f"No matching image_ids found in {method.upper()} metadata.")
 
         sprite_dim = int(np.ceil(np.sqrt(len(full_metadata))))
         sprite_width = 32
@@ -679,5 +570,4 @@ async def make_umap_subset(payload: TSNESubsetRequest):
         })
 
     except Exception as e:
-        print(f"Error in make_umap_subset: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
