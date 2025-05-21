@@ -313,6 +313,21 @@ def generate_tsne_from_lmdb(batch_size=512, output_dim=2, perplexity=30, device_
 
     return tsne_result, metadata
 
+@app.get("/api/save_all_embeddings")
+async def save_all_embeddings():
+    output_embeddings_path="./output/all_embeddings.npy"
+    output_metadata_path="./output/all_metadata.json"
+    device = torch.device("cuda:0")
+    model = initialize_model(device)
+    embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size=512, lmdb_batch_size=2000)
+
+    np.save(output_embeddings_path, embeddings)
+    with open(output_metadata_path, "w") as f:
+        json.dump(metadata, f, indent=4)
+
+    print(f"✅ Saved embeddings to {output_embeddings_path} and metadata to {output_metadata_path}")
+
+# save_all_embeddings()
 #---------- Generate t-SNE ---------- #
  
 @app.get("/api/dimensionality-reduction/{method}")
@@ -439,6 +454,70 @@ async def make_tsne():
 
 class TSNESubsetRequest(BaseModel):
     image_ids: List[str]
+@app.post("/api/make_tsne_subset_fast")
+async def make_tsne_subset_fast(payload: TSNESubsetRequest):
+    try:
+        image_ids = payload.image_ids
+
+        if not image_ids:
+            raise HTTPException(status_code=400, detail="No image_ids provided.")
+
+        # Load precomputed data
+        embeddings = np.load("./output/all_embeddings.npy")
+        with open("./output/all_metadata.json", "r") as f:
+            all_metadata = json.load(f)
+
+        # Map image_id to index
+        id_to_index = {meta["image_id"]: idx for idx, meta in enumerate(all_metadata)}
+        
+        selected_indices = [id_to_index[iid] for iid in image_ids if iid in id_to_index]
+        if not selected_indices:
+            raise HTTPException(status_code=404, detail="None of the requested image_ids found in metadata.")
+
+        selected_embeddings = embeddings[selected_indices]
+        selected_metadata = [all_metadata[i] for i in selected_indices]
+
+        # Run t-SNE
+        perplexity = min(30, len(selected_embeddings) - 1)
+        tsne_result = compute_tsne(selected_embeddings, output_dim=2, perplexity=perplexity)
+
+        # Save sprite + metadata
+        output_dir = "./output"
+        os.makedirs(output_dir, exist_ok=True)
+        sprite_path = f"{output_dir}/sprite_sheet_subset_fast.png"
+        metadata_path = f"{output_dir}/tsne_subset_fast_metadata.json"
+
+        result = create_sprite_sheet_from_mongodb(
+            output_sprite=sprite_path,
+            output_json=metadata_path,
+            reduction_method="tsne_subset_fast",
+            coordinates=tsne_result,
+            metadata=selected_metadata
+        )
+
+        with open(metadata_path, "r") as file:
+            json_data = json.load(file)
+
+        sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
+        sprite_width = 32
+        sprite_height = 32
+
+        return JSONResponse({
+            "spritePath": {
+                "columns": sprite_dim,
+                "rows": sprite_dim,
+                "width": sprite_dim * sprite_width,
+                "height": sprite_dim * sprite_height,
+                "sprite_width": sprite_width,
+                "sprite_height": sprite_height,
+                "url": "/output/sprite_sheet_subset_fast.png"
+            },
+            "itemsPath": json_data
+        })
+
+    except Exception as e:
+        print(f"Error in make_tsne_subset_fast: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 def create_sprite_sheet_from_mongodb(output_sprite, output_json, reduction_method, coordinates, metadata):
     """
@@ -493,78 +572,27 @@ def create_sprite_sheet_from_mongodb(output_sprite, output_json, reduction_metho
 @app.post("/api/make_tsne_subset")
 async def make_tsne_subset(payload: TSNESubsetRequest):
     try:
-        start_time = time.time()
         image_ids = payload.image_ids
-
         if not image_ids:
             raise HTTPException(status_code=400, detail="No image_ids provided.")
 
-        device = torch.device("cuda:0")
-        model = initialize_model(device)
+        metadata_path = "./output/tsne_metadata.json"
+        sprite_path = "/output/sprite_sheet.png"  # Relative path exposed via StaticFiles
 
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        if not os.path.exists(metadata_path):
+            raise HTTPException(status_code=404, detail="Full metadata not found.")
 
-        image_tensors, metadata = [], []
-
-        def load_image(image_id):
-            try:
-                img_data = db_get_image(image_id)
-                doc = db_get_image_with_details(image_id)
-                img = Image.open(BytesIO(img_data)).convert("RGB")
-                tensor = transform(img)
-                return tensor, {
-                    "image_id": image_id,
-                    "filename": doc.get("filename", "unknown"),
-                    "category": doc.get("category", "Unknown")
-                }
-            except Exception as e:
-                print(f"❌ Skipping image {image_id}: {e}")
-                return None, None
-
-        with ThreadPoolExecutor(max_workers=32) as executor:
-            results = list(executor.map(load_image, image_ids))
-
-        for tensor, meta in results:
-            if tensor is not None:
-                image_tensors.append(tensor)
-                metadata.append(meta)
-
-        if not image_tensors:
-            raise HTTPException(status_code=400, detail="No valid images found.")
-
-        batch_tensor = torch.stack(image_tensors).to(device)
-        with torch.no_grad(), torch.cuda.amp.autocast():
-            feats = model(batch_tensor)
-        embeddings = feats.cpu().numpy()
-
-        tsne_result = compute_tsne(embeddings, output_dim=2, perplexity=30)
-        method = "tsne_subset"
-
-        # Output paths
-        output_dir = "./output"
-        os.makedirs(output_dir, exist_ok=True)
-        sprite_path = f"{output_dir}/sprite_sheet_subset.png"
-        metadata_path = f"{output_dir}/{method}_metadata.json"
-
-        result = create_sprite_sheet_from_mongodb(
-            output_sprite=sprite_path,
-            output_json=metadata_path,
-            reduction_method=method,
-            coordinates=tsne_result,
-            metadata=metadata
-        )
-
-        if not result:
-            raise HTTPException(status_code=500, detail="Failed to generate sprite sheet")
-
+        # Load full metadata
         with open(metadata_path, "r") as file:
-            json_data = json.load(file)
+            full_metadata = json.load(file)
 
-        sprite_dim = int(np.ceil(np.sqrt(len(json_data))))
+        # Filter for selected image_ids
+        filtered_metadata = [item for item in full_metadata if item["image_id"] in image_ids]
+
+        if not filtered_metadata:
+            raise HTTPException(status_code=404, detail="No matching image_ids found in full metadata.")
+
+        sprite_dim = int(np.ceil(np.sqrt(len(full_metadata))))
         sprite_width = 32
         sprite_height = 32
 
@@ -576,10 +604,11 @@ async def make_tsne_subset(payload: TSNESubsetRequest):
                 "height": sprite_dim * sprite_height,
                 "sprite_width": sprite_width,
                 "sprite_height": sprite_height,
-                "url": "/output/sprite_sheet_subset.png"
+                "url": sprite_path
             },
-            "itemsPath": json_data
+            "itemsPath": filtered_metadata
         })
 
     except Exception as e:
+        print(f"Error in make_tsne_subset: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
