@@ -62,6 +62,9 @@ def create_sprite_sheet(output_sprite, output_json, reduction_method, coordinate
             img = Image.open(BytesIO(image_data)).convert("RGB")
             img = img.resize(thumb_size)
 
+            # # Draw image_id or idx as overlay (annotation)
+            # draw = ImageDraw.Draw(img)
+            # draw.text((2, 2), str(idx), fill=(255, 0, 0))  # Optional: use font
             # Calculate sprite position
             col = idx % sprite_dim
             row = idx // sprite_dim
@@ -194,9 +197,12 @@ def extract_embeddings_from_lmdb(model, device, batch_size, lmdb_batch_size):
             with torch.cuda.amp.autocast():
                 with torch.no_grad():
                     feats = model(batch_tensor)
-            
-            all_embeddings.append(feats.cpu().numpy())
-            all_metadata.extend(metadata)
+            batch_embeddings = feats.cpu().numpy()
+            for emb, meta in zip(batch_embeddings, metadata):
+                all_embeddings.append(emb)
+                all_metadata.append(meta)
+            # all_embeddings.append(feats.cpu().numpy())
+            # all_metadata.extend(metadata)
 
             torch.cuda.empty_cache()
 
@@ -269,7 +275,7 @@ def generate_umap_from_lmdb(batch_size=512, output_dim=2, device_str="cuda", lmd
 
 
 # ----------------------------- STATIC FILES -----------------------------
-app.mount("/api/output", StaticFiles(directory="api/output"), name="/api/output")
+app.mount("/api/output", StaticFiles(directory="output"), name="output")
 
 # ----------------------------- ROOT -----------------------------
 @app.get("/")
