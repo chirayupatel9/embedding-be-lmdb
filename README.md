@@ -18,20 +18,7 @@ docker run --name mongodb \
   --restart unless-stopped \
   -d mongodb/mongodb-community-server:latest
 
-```
-## Create a user
-```bash
-mongosh
-```
-```bash
-use admin
-db.createUser({
-  user: "mongouser",
-  pwd: "password123",
-  roles: [{ role: "readWrite", db: "*" }]
-})
 
-```
 
 ## Install python dependencies 
 ```bash
@@ -116,7 +103,7 @@ graph TD
 
 ## Docker Setup
 
-### Development Environment
+### Running Environment
 
 To run the application in development mode:
 
@@ -125,7 +112,7 @@ To run the application in development mode:
 3. Run:
 
 ```bash
-docker-compose -f docker-compose.dev.yml up --build
+docker-compose -f docker-compose.yml up --build
 ```
 
 This will:
@@ -133,28 +120,17 @@ This will:
 - Run with the debug mode enabled
 - Use non-authenticated MongoDB instance
 
-### Production Environment
 
-For production deployment:
+## Once app is running
+Running this api's in a sequence
 
-1. Create a `.env` file with the following variables:
-   ```
-   MONGO_USER=your_mongo_username
-   MONGO_PASSWORD=your_secure_password
-   ```
-
-2. Run:
-
+- To load/upload data with folder path of metadata and images
 ```bash
-docker-compose -f docker-compose.prod.yml up -d
+/api/upload-images
+```
+- Followed by this run the following api with method as UMap and TSNE
+```bash
+/api/make_reduction/{method}
 ```
 
-This will:
-- Use a multi-stage build for smaller image size
-- Run MongoDB with authentication
-- Set resource limits for containers
-- Use multiple workers for better performance
-
-### Accessing the API
-
-The API will be available at: http://localhost:8000
+Later everything will be handled in UI.
