@@ -263,7 +263,7 @@ def compute_umap(embeddings, output_dim=2, n_neighbors=15, min_dist=0.1):
     return umap_result
 
 # ----------------------------- GENERATE UMAP FROM LMDB -----------------------------
-def generate_umap_from_lmdb(batch_size=512, output_dim=2, device_str="cuda", lmdb_batch_size=2000):
+def generate_umap_from_lmdb(batch_size=512, output_dim=2, device_str="cuda:2", lmdb_batch_size=2000):
     device = torch.device(device_str)
     print(f"Using device: {device}")
 
@@ -415,7 +415,7 @@ async def get_image_with_metadata(image_id: str):
 async def save_all_embeddings():
     output_embeddings_path="./output/all_embeddings.npy"
     output_metadata_path="./output/all_metadata.json"
-    device = torch.device("cuda:0")
+    device = torch.device("cuda:2")
     model = initialize_model(device)
     embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size=512, lmdb_batch_size=2000)
 
