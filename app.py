@@ -22,13 +22,14 @@ import base64
 import torch
 import torch.nn as nn
 from torchvision import transforms, models
+import timm
 from tqdm import tqdm
 from cuml.manifold import TSNE, UMAP
 import cupy as cp
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
-from typing import List
+from typing import List, Literal
 
 app = FastAPI()
 
@@ -126,12 +127,52 @@ class ResNet50Embedder(nn.Module):
         x = x.view(x.size(0), -1)
         return x
 
+
+class XCiTEmbedder(nn.Module):
+    def __init__(self, in_channels=3, pretrained_path=None):
+        super().__init__()
+        # Load pretrained timm model
+        self.model = timm.create_model(
+            'xcit_small_12_p8_224',
+            pretrained=False,
+            num_classes=0,  # Remove classification head
+            in_chans=in_channels
+        )
+
+        # Optionally load your custom weights
+        if pretrained_path:
+            try:
+                state_dict = torch.load(pretrained_path, map_location="cpu")
+
+                # Remove `module.` prefix if trained using DataParallel
+                state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+
+                # Remove classifier head weights if present
+                state_dict = {k: v for k, v in state_dict.items() if not k.startswith("head.")}
+
+                missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+                print(f"✅ Loaded XCiT weights from {pretrained_path}")
+                if missing:
+                    print("⚠️ Missing keys:", missing)
+                if unexpected:
+                    print("⚠️ Unexpected keys:", unexpected)
+            except Exception as e:
+                print(f"❌ Failed to load XCiT weights: {e}")
+
+    def forward(self, x):
+        return self.model(x) 
 # ----------------------------- INITIALIZE MODEL -----------------------------
-def initialize_model(device):
-    model = ResNet50Embedder()
+def initialize_model(device, model_type: Literal["resnet50", "xcit"] = "resnet50"):
+    if model_type == "resnet50":
+        model = ResNet50Embedder()
+    elif model_type == "xcit":
+        model = XCiTEmbedder()
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
     model = model.to(device)
     model.eval()
-    print("✅ Model initialized and ready.")
+    print(f"✅ {model_type.upper()} model initialized and ready.")
     return model
 
 # def initialize_model(device):
@@ -234,11 +275,11 @@ def compute_tsne(embeddings, output_dim=2, perplexity=30, n_iter=1000):
     return tsne_result
 
 # ----------------------------- GENERATE T-SNE FROM LMDB -----------------------------
-def generate_tsne_from_lmdb(batch_size=512, output_dim=2, perplexity=30, device_str="cuda", lmdb_batch_size=2000):
+def generate_tsne_from_lmdb(batch_size=512, output_dim=2, perplexity=30, device_str="cuda", lmdb_batch_size=2000, model_type: Literal["resnet50", "xcit"] = "resnet50"):
     device = torch.device(device_str)
     print(f"Using device: {device}")
 
-    model = initialize_model(device)
+    model = initialize_model(device, model_type)
     embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size, lmdb_batch_size)
     tsne_result = compute_tsne(embeddings, output_dim=output_dim, perplexity=perplexity)
 
@@ -263,11 +304,11 @@ def compute_umap(embeddings, output_dim=2, n_neighbors=15, min_dist=0.1):
     return umap_result
 
 # ----------------------------- GENERATE UMAP FROM LMDB -----------------------------
-def generate_umap_from_lmdb(batch_size=512, output_dim=2, device_str="cuda:2", lmdb_batch_size=2000):
+def generate_umap_from_lmdb(batch_size=512, output_dim=2, device_str="cuda", lmdb_batch_size=2000, model_type: Literal["resnet50", "xcit"] = "resnet50"):
     device = torch.device(device_str)
     print(f"Using device: {device}")
 
-    model = initialize_model(device)
+    model = initialize_model(device, model_type)
     embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size, lmdb_batch_size)
     umap_result = compute_umap(embeddings, output_dim=output_dim)
 
@@ -415,7 +456,7 @@ async def get_image_with_metadata(image_id: str):
 async def save_all_embeddings():
     output_embeddings_path="./output/all_embeddings.npy"
     output_metadata_path="./output/all_metadata.json"
-    device = torch.device("cuda:2")
+    device = torch.device("cuda")
     model = initialize_model(device)
     embeddings, metadata = extract_embeddings_from_lmdb(model, device, batch_size=512, lmdb_batch_size=2000)
 
@@ -427,33 +468,48 @@ async def save_all_embeddings():
 
 # ----------------------------- DIMENSIONALITY REDUCTION -----------------------------
 @app.get("/api/dimensionality-reduction/{method}")
-async def dimensionality_reduction(method: str):
-
+async def dimensionality_reduction(method: str, model_type: Literal["resnet50", "xcit"] = "resnet50"):
     """
-    Perform dimensionality reduction using either UMAP or t-SNE.
-    Args:
-        method (str): Dimensionality reduction method ("tsne" or "umap")
-    Returns:
-        JSONResponse: Contains the reduced coordinates and metadata
+    Generate dimensionality reduction visualization using specified method and model.
     """
     try:
-        if method.lower() not in ["tsne", "umap"]:
+        method = method.lower()
+        if method not in ["tsne", "umap"]:
             raise HTTPException(status_code=400, detail="Method must be either 'tsne' or 'umap'")
         
         # Perform dimensionality reduction
-        if method.lower() == "tsne":
-            metadata_path = f"./output/{method}_metadata.json"
+        if method == "tsne":
+            result_coords, metadata = generate_tsne_from_lmdb(model_type=model_type)
         else:  # umap
-            metadata_path = f"./output/{method}_metadata.json"
+            result_coords, metadata = generate_umap_from_lmdb(model_type=model_type)
         
-        # Prepare response
-        with open(metadata_path, "r") as file:
-            json_data = json.load(file)
-            
+        # Create output directory if it doesn't exist
+        output_dir = "./output"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate sprite sheet and metadata
+        sprite_path = f"{output_dir}/sprite_sheet.png"
+        metadata_path = f"{output_dir}/{method}_metadata.json"
+        
+        result = create_sprite_sheet(
+            output_sprite=sprite_path,
+            output_json=metadata_path,
+            reduction_method=method,
+            coordinates=result_coords,
+            metadata=metadata
+        )
+        
+        if not result:
+            raise HTTPException(status_code=500, detail=f"Failed to generate {method.upper()} sprite sheet")
+        
+        # Read the generated metadata
+        with open(metadata_path, "r") as f:
+            json_data = json.load(f)
+        
         # Calculate sprite sheet dimensions
         num_images = len(json_data)
         sprite_dim = int(np.ceil(np.sqrt(num_images)))
-        sprite_width = 32  # Each sprite is 32x32 pixels
+        sprite_width = 32
         sprite_height = 32
         
         return JSONResponse({
@@ -474,7 +530,10 @@ async def dimensionality_reduction(method: str):
 
 # ----------------------------- MAKE T-SNE -----------------------------
 @app.get("/api/make_reduction/{method}")
-async def make_reduction(method: str):
+async def make_reduction(method: str, model_type: Literal["resnet50", "xcit"] = "resnet50"):
+    """
+    Generate dimensionality reduction visualization using specified method and model.
+    """
     try:
         method = method.lower()
         if method not in ["tsne", "umap"]:
@@ -507,9 +566,9 @@ async def make_reduction(method: str):
 
         # Generate embeddings and reduction
         if method == "tsne":
-            result_coords, metadata = generate_tsne_from_lmdb()
+            result_coords, metadata = generate_tsne_from_lmdb(model_type=model_type)
         else:
-            result_coords, metadata = generate_umap_from_lmdb()
+            result_coords, metadata = generate_umap_from_lmdb(model_type=model_type)
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -553,7 +612,10 @@ class TSNESubsetRequest(BaseModel):
 
 # ----------------------------- MAKE T-SNE SUBSET -----------------------------
 @app.post("/api/make_reduction_subset/{method}")
-async def make_reduction_subset(method: str, payload: TSNESubsetRequest):
+async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_type: Literal["resnet50", "xcit"] = "resnet50"):
+    """
+    Generate dimensionality reduction visualization for a subset of images using specified method and model.
+    """
     try:
         method = method.lower()
         if method not in ["tsne", "umap"]:
