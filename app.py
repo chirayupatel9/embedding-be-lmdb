@@ -265,8 +265,7 @@ def compute_tsne(embeddings, output_dim=2, perplexity=30, n_iter=1000):
         perplexity=perplexity,
         n_iter=n_iter,
         verbose=1,
-        method="barnes_hut",
-        num_workers=16
+        method="barnes_hut"
     )
     tsne_result_gpu = tsne.fit_transform(embeddings_gpu)
 
@@ -611,7 +610,62 @@ async def make_reduction(method: str, model_name: str = "resnet50"):
 class TSNESubsetRequest(BaseModel):
     image_ids: List[str]
 
-# ----------------------------- MAKE T-SNE SUBSET -----------------------------
+# ----------------------------- EXTRACT EMBEDDINGS FROM SUBSET -----------------------------
+def extract_embeddings_from_subset(model, device, image_ids, batch_size=512):
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    all_embeddings = []
+    all_metadata = []
+
+    # Get documents for the subset of image_ids
+    documents = [doc for doc in db_get_all_documents() if doc["image_id"] in image_ids]
+    print(f"✅ Processing {len(documents)} documents for subset.")
+
+    for batch_start in tqdm(range(0, len(documents), batch_size), desc="Processing subset batches"):
+        batch_docs = documents[batch_start: batch_start + batch_size]
+        image_tensors, metadata = process_lmdb_documents(batch_docs, transform)
+
+        if image_tensors:
+            batch_tensor = torch.stack(image_tensors)
+            batch_tensor = batch_tensor.to(device, non_blocking=True)
+
+            with torch.cuda.amp.autocast():
+                with torch.no_grad():
+                    feats = model(batch_tensor)
+            batch_embeddings = feats.cpu().numpy()
+            for emb, meta in zip(batch_embeddings, metadata):
+                all_embeddings.append(emb)
+                all_metadata.append(meta)
+
+            torch.cuda.empty_cache()
+
+    if not all_embeddings:
+        raise Exception("No valid images found in subset.")
+
+    embeddings = np.vstack(all_embeddings)
+    print(f"✅ Extracted embeddings shape: {embeddings.shape}")
+    return embeddings, all_metadata
+
+# ----------------------------- GENERATE SUBSET REDUCTION -----------------------------
+def generate_subset_reduction(method: str, image_ids: List[str], model_name: str = "resnet50"):
+    device = torch.device("cuda")
+    print(f"Using device: {device}")
+
+    model = initialize_model(device, model_name)
+    embeddings, metadata = extract_embeddings_from_subset(model, device, image_ids)
+
+    if method == "tsne":
+        result = compute_tsne(embeddings)
+    else:  # umap
+        result = compute_umap(embeddings)
+
+    return result, metadata
+
+# ----------------------------- MAKE REDUCTION SUBSET -----------------------------
 @app.post("/api/make_reduction_subset/{method}/{model_name}")
 async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_name: str = "resnet50"):
     """
@@ -626,21 +680,31 @@ async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_n
         if not image_ids:
             raise HTTPException(status_code=400, detail="No image_ids provided.")
 
-        metadata_path = f"./output/{method}_{model_name}_metadata.json"
-        sprite_path = f"/output/sprite_sheet.png"
+        # Generate embeddings and reduction for subset
+        result_coords, metadata = generate_subset_reduction(method, image_ids, model_name)
 
-        if not os.path.exists(metadata_path):
-            raise HTTPException(status_code=404, detail=f"{method.upper()} metadata not found.")
+        # Create output directory if it doesn't exist
+        output_dir = "./output"
+        os.makedirs(output_dir, exist_ok=True)
 
-        with open(metadata_path, "r") as file:
-            full_metadata = json.load(file)
+        # Generate sprite sheet and metadata
+        sprite_path = f"{output_dir}/sprite_sheet.png"
+        metadata_path = f"{output_dir}/{method}_{model_name}_subset_metadata.json"
 
-        filtered_metadata = [item for item in full_metadata if item["image_id"] in image_ids]
+        result = create_sprite_sheet(
+            output_sprite=sprite_path,
+            output_json=metadata_path,
+            reduction_method=method,
+            coordinates=result_coords,
+            metadata=metadata
+        )
 
-        if not filtered_metadata:
-            raise HTTPException(status_code=404, detail=f"No matching image_ids found in {method.upper()} metadata.")
+        if not result:
+            raise HTTPException(status_code=500, detail=f"Failed to generate {method.upper()} sprite sheet")
 
-        sprite_dim = int(np.ceil(np.sqrt(len(full_metadata))))
+        # Calculate sprite sheet dimensions
+        num_images = len(metadata)
+        sprite_dim = int(np.ceil(np.sqrt(num_images)))
         sprite_width = 32
         sprite_height = 32
 
@@ -652,9 +716,9 @@ async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_n
                 "height": sprite_dim * sprite_height,
                 "sprite_width": sprite_width,
                 "sprite_height": sprite_height,
-                "url": sprite_path
+                "url": "/output/sprite_sheet.png"
             },
-            "itemsPath": filtered_metadata
+            "itemsPath": metadata
         })
 
     except Exception as e:
