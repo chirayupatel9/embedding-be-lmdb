@@ -542,7 +542,7 @@ async def make_reduction(method: str, model_name: str = "resnet50"):
         output_dir = "./output"
         sprite_path = f"{output_dir}/sprite_sheet.png"
         metadata_path = f"{output_dir}/{method}_{model_name}_metadata.json"
-
+    
         if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0:
             with open(metadata_path, "r") as f:
                 json_data = json.load(f)
