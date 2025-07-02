@@ -687,8 +687,8 @@ async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_n
         output_dir = "./output"
         os.makedirs(output_dir, exist_ok=True)
 
-        # Generate sprite sheet and metadata
-        sprite_path = f"{output_dir}/sprite_sheet.png"
+        # Generate sprite sheet and metadata with unique names
+        sprite_path = f"{output_dir}/sprite_sheet_subset.png"
         metadata_path = f"{output_dir}/{method}_{model_name}_subset_metadata.json"
 
         result = create_sprite_sheet(
@@ -716,7 +716,7 @@ async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_n
                 "height": sprite_dim * sprite_height,
                 "sprite_width": sprite_width,
                 "sprite_height": sprite_height,
-                "url": "/output/sprite_sheet.png"
+                "url": "/output/sprite_sheet_subset.png"
             },
             "itemsPath": metadata
         })
