@@ -11,5 +11,6 @@ lmdb_database/data.mdb
 lmdb_database/data.mdb
 lmdb_database/*.mdb
 lmdb_database/*
+*output/*
 output/*
 *.json

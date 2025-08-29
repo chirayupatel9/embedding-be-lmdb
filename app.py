@@ -17,7 +17,6 @@ from db_functions_lmdb import (
     create_document_with_image
 )
 from io import BytesIO
-import numpy as np
 import base64
 import torch
 import torch.nn as nn
@@ -30,6 +29,17 @@ from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 from typing import List, Literal
+
+# Check NumPy availability
+try:
+    import numpy as np
+    print(f"✅ NumPy version: {np.__version__}")
+    if not hasattr(np, 'ndarray'):
+        raise ImportError("NumPy is not properly installed")
+except ImportError as e:
+    print(f"❌ NumPy import error: {e}")
+    print("Please install NumPy with: pip install numpy==1.24.3")
+    raise
 
 app = FastAPI()
 
@@ -57,15 +67,26 @@ def create_sprite_sheet(output_sprite, output_json, reduction_method, coordinate
     sprite_sheet = Image.new("RGB", (sprite_dim * 32, sprite_dim * 32), (0, 0, 0))
     items = []
 
+    # Create a mapping from image_id to coordinates for subset processing
+    coord_map = {}
+    if len(coordinates) == len(metadata):
+        # If coordinates and metadata have same length, assume they're in order
+        for idx, meta in enumerate(metadata):
+            if idx < len(coordinates):
+                coord_map[meta["image_id"]] = coordinates[idx]
+    else:
+        # For subset processing, we need to match by image_id
+        # This assumes coordinates are returned in the same order as metadata from extract_embeddings_from_subset
+        for idx, meta in enumerate(metadata):
+            if idx < len(coordinates):
+                coord_map[meta["image_id"]] = coordinates[idx]
+
     for idx, meta in enumerate(metadata):
         try:
             image_data = db_get_image(meta["image_id"])
             img = Image.open(BytesIO(image_data)).convert("RGB")
             img = img.resize(thumb_size)
 
-            # # Draw image_id or idx as overlay (annotation)
-            # draw = ImageDraw.Draw(img)
-            # draw.text((2, 2), str(idx), fill=(255, 0, 0))  # Optional: use font
             # Calculate sprite position
             col = idx % sprite_dim
             row = idx // sprite_dim
@@ -74,8 +95,14 @@ def create_sprite_sheet(output_sprite, output_json, reduction_method, coordinate
             
             sprite_sheet.paste(img, (x, y))
 
+            # Get coordinates for this image
+            coord = coord_map.get(meta["image_id"])
+            if coord is None:
+                print(f"Warning: No coordinates found for image {meta['image_id']}")
+                coord = [0.0, 0.0]  # Default coordinates
+
             items.append({
-                "embedding": [float(coordinates[idx][0]), float(coordinates[idx][1])],
+                "embedding": [float(coord[0]), float(coord[1])],
                 "image_id": meta["image_id"],
                 "filename": meta.get("filename", "unknown"),
                 "category": meta.get("category", "Unknown"),
@@ -191,7 +218,21 @@ def process_lmdb_documents(batch_docs, transform):
     def load_image(doc):
         try:
             img_data = db_get_image(doc["image_id"])
+            if img_data is None:
+                print(f"Warning: No image data found for {doc.get('image_id', 'unknown')}")
+                return None, None
+                
             img = Image.open(BytesIO(img_data)).convert("RGB")
+            
+            # Ensure numpy is available before tensor conversion
+            try:
+                import numpy as np
+                if not hasattr(np, 'ndarray'):
+                    raise ImportError("NumPy is not properly installed or accessible")
+            except ImportError as np_error:
+                print(f"NumPy import error for image {doc.get('image_id', 'unknown')}: {np_error}")
+                return None, None
+            
             img_tensor = transform(img)
             return img_tensor, {
                 "image_id": doc["image_id"],
@@ -316,7 +357,7 @@ def generate_umap_from_lmdb(batch_size=512, output_dim=2, device_str="cuda", lmd
 
 
 # ----------------------------- STATIC FILES -----------------------------
-app.mount("/api/output", StaticFiles(directory="output"), name="output")
+app.mount("/output", StaticFiles(directory="output"), name="output")
 
 # ----------------------------- ROOT -----------------------------
 @app.get("/")
@@ -680,8 +721,14 @@ async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_n
         if not image_ids:
             raise HTTPException(status_code=400, detail="No image_ids provided.")
 
+        print(f"🔄 Processing subset reduction: {method} with {model_name}")
+        print(f"📊 Number of selected images: {len(image_ids)}")
+
         # Generate embeddings and reduction for subset
         result_coords, metadata = generate_subset_reduction(method, image_ids, model_name)
+
+        print(f"✅ Generated coordinates shape: {result_coords.shape}")
+        print(f"✅ Metadata count: {len(metadata)}")
 
         # Create output directory if it doesn't exist
         output_dir = "./output"
@@ -702,11 +749,18 @@ async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_n
         if not result:
             raise HTTPException(status_code=500, detail=f"Failed to generate {method.upper()} sprite sheet")
 
+        # Read the processed items from the JSON file
+        with open(metadata_path, "r") as f:
+            processed_items = json.load(f)
+
         # Calculate sprite sheet dimensions
-        num_images = len(metadata)
+        num_images = len(processed_items)
         sprite_dim = int(np.ceil(np.sqrt(num_images)))
         sprite_width = 32
         sprite_height = 32
+
+        print(f"✅ Generated sprite sheet: {sprite_dim}x{sprite_dim} grid")
+        print(f"✅ Processed {len(processed_items)} items with sprite coordinates")
 
         return JSONResponse({
             "spritePath": {
@@ -718,8 +772,9 @@ async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_n
                 "sprite_height": sprite_height,
                 "url": "/output/sprite_sheet_subset.png"
             },
-            "itemsPath": metadata
+            "itemsPath": processed_items
         })
 
     except Exception as e:
+        print(f"❌ Error in subset reduction: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
