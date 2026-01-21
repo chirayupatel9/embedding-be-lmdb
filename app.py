@@ -12,6 +12,8 @@ from db_functions_lmdb import (
     get_all_images as db_get_all_images,
     get_image_with_details as db_get_image_with_details,
     get_image as db_get_image,
+    get_images_batch as db_get_images_batch,
+    get_documents_by_image_ids as db_get_documents_by_image_ids,
     upload_images_from_folder,
     get_metadata_image_relationships,
     create_document_with_image
@@ -98,9 +100,16 @@ def create_sprite_sheet(output_sprite, output_json, reduction_method, coordinate
             if idx < len(coordinates):
                 coord_map[meta["image_id"]] = coordinates[idx]
 
+    # Batch retrieve all images in a single LMDB transaction
+    image_ids = [meta["image_id"] for meta in metadata if meta.get("image_id")]
+    images_dict = db_get_images_batch(image_ids)
+    
     for idx, meta in enumerate(metadata):
         try:
-            image_data = db_get_image(meta["image_id"])
+            image_data = images_dict.get(meta["image_id"])
+            if image_data is None:
+                print(f"Warning: No image data found for {meta.get('image_id', 'unknown')}")
+                continue
             img = Image.open(BytesIO(image_data)).convert("RGB")
             img = img.resize(thumb_size)
 
@@ -232,9 +241,13 @@ def process_lmdb_documents(batch_docs, transform):
     image_tensors = []
     valid_metadata = []
 
+    # Batch retrieve all images in a single LMDB transaction
+    image_ids = [doc["image_id"] for doc in batch_docs if doc.get("image_id")]
+    images_dict = db_get_images_batch(image_ids)
+
     def load_image(doc):
         try:
-            img_data = db_get_image(doc["image_id"])
+            img_data = images_dict.get(doc["image_id"])
             if img_data is None:
                 print(f"Warning: No image data found for {doc.get('image_id', 'unknown')}")
                 return None, None
@@ -706,8 +719,8 @@ def extract_embeddings_from_subset(model, device, image_ids, batch_size=512):
     all_embeddings = []
     all_metadata = []
 
-    # Get documents for the subset of image_ids
-    documents = [doc for doc in db_get_all_documents() if doc["image_id"] in image_ids]
+    # Efficiently get documents for the subset of image_ids using batch cursor operation
+    documents = db_get_documents_by_image_ids(image_ids)
     print(f"✅ Processing {len(documents)} documents for subset.")
 
     for batch_start in tqdm(range(0, len(documents), batch_size), desc="Processing subset batches"):
