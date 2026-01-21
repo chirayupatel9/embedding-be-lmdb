@@ -17,19 +17,46 @@ from db_functions_lmdb import (
     create_document_with_image
 )
 from io import BytesIO
-import numpy as np
 import base64
 import torch
 import torch.nn as nn
 from torchvision import transforms, models
 import timm
 from tqdm import tqdm
-from cuml.manifold import TSNE, UMAP
-import cupy as cp
+import importlib
+from typing import Any, Optional
+
+# Optional GPU acceleration (RAPIDS cuML + CuPy). These are not available in many
+# environments (notably most Windows Python setups), so we fall back to CPU.
+_HAS_CUML: bool = False
+TSNE: Optional[Any] = None
+UMAP: Optional[Any] = None
+cp: Optional[Any] = None
+
+try:
+    _cuml_manifold = importlib.import_module("cuml.manifold")
+    TSNE = getattr(_cuml_manifold, "TSNE")
+    UMAP = getattr(_cuml_manifold, "UMAP")
+    cp = importlib.import_module("cupy")
+    _HAS_CUML = True
+except Exception:
+    # CPU fallback will be used inside compute_tsne/compute_umap.
+    _HAS_CUML = False
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 from typing import List, Literal
+
+# Check NumPy availability
+try:
+    import numpy as np
+    print(f"✅ NumPy version: {np.__version__}")
+    if not hasattr(np, 'ndarray'):
+        raise ImportError("NumPy is not properly installed")
+except ImportError as e:
+    print(f"❌ NumPy import error: {e}")
+    print("Please install NumPy with: pip install numpy==1.24.3")
+    raise
 
 app = FastAPI()
 
@@ -57,15 +84,26 @@ def create_sprite_sheet(output_sprite, output_json, reduction_method, coordinate
     sprite_sheet = Image.new("RGB", (sprite_dim * 32, sprite_dim * 32), (0, 0, 0))
     items = []
 
+    # Create a mapping from image_id to coordinates for subset processing
+    coord_map = {}
+    if len(coordinates) == len(metadata):
+        # If coordinates and metadata have same length, assume they're in order
+        for idx, meta in enumerate(metadata):
+            if idx < len(coordinates):
+                coord_map[meta["image_id"]] = coordinates[idx]
+    else:
+        # For subset processing, we need to match by image_id
+        # This assumes coordinates are returned in the same order as metadata from extract_embeddings_from_subset
+        for idx, meta in enumerate(metadata):
+            if idx < len(coordinates):
+                coord_map[meta["image_id"]] = coordinates[idx]
+
     for idx, meta in enumerate(metadata):
         try:
             image_data = db_get_image(meta["image_id"])
             img = Image.open(BytesIO(image_data)).convert("RGB")
             img = img.resize(thumb_size)
 
-            # # Draw image_id or idx as overlay (annotation)
-            # draw = ImageDraw.Draw(img)
-            # draw.text((2, 2), str(idx), fill=(255, 0, 0))  # Optional: use font
             # Calculate sprite position
             col = idx % sprite_dim
             row = idx // sprite_dim
@@ -74,8 +112,14 @@ def create_sprite_sheet(output_sprite, output_json, reduction_method, coordinate
             
             sprite_sheet.paste(img, (x, y))
 
+            # Get coordinates for this image
+            coord = coord_map.get(meta["image_id"])
+            if coord is None:
+                print(f"Warning: No coordinates found for image {meta['image_id']}")
+                coord = [0.0, 0.0]  # Default coordinates
+
             items.append({
-                "embedding": [float(coordinates[idx][0]), float(coordinates[idx][1])],
+                "embedding": [float(coord[0]), float(coord[1])],
                 "image_id": meta["image_id"],
                 "filename": meta.get("filename", "unknown"),
                 "category": meta.get("category", "Unknown"),
@@ -191,7 +235,21 @@ def process_lmdb_documents(batch_docs, transform):
     def load_image(doc):
         try:
             img_data = db_get_image(doc["image_id"])
+            if img_data is None:
+                print(f"Warning: No image data found for {doc.get('image_id', 'unknown')}")
+                return None, None
+                
             img = Image.open(BytesIO(img_data)).convert("RGB")
+            
+            # Ensure numpy is available before tensor conversion
+            try:
+                import numpy as np
+                if not hasattr(np, 'ndarray'):
+                    raise ImportError("NumPy is not properly installed or accessible")
+            except ImportError as np_error:
+                print(f"NumPy import error for image {doc.get('image_id', 'unknown')}: {np_error}")
+                return None, None
+            
             img_tensor = transform(img)
             return img_tensor, {
                 "image_id": doc["image_id"],
@@ -256,21 +314,34 @@ def extract_embeddings_from_lmdb(model, device, batch_size, lmdb_batch_size):
 
 # ----------------------------- COMPUTE T-SNE -----------------------------
 def compute_tsne(embeddings, output_dim=2, perplexity=30, n_iter=1000):
-    print("🚀 Running cuML t-SNE...")
     start_time = time.time()
-    embeddings_gpu = cp.asarray(embeddings)
 
-    tsne = TSNE(
+    if _HAS_CUML and TSNE is not None and cp is not None:
+        print("🚀 Running cuML t-SNE...")
+        embeddings_gpu = cp.asarray(embeddings)
+        tsne = TSNE(
+            n_components=output_dim,
+            perplexity=perplexity,
+            n_iter=n_iter,
+            verbose=1,
+            method="barnes_hut",
+        )
+        tsne_result_gpu = tsne.fit_transform(embeddings_gpu)
+        tsne_result = cp.asnumpy(tsne_result_gpu)
+        print(f"✅ t-SNE completed in {time.time() - start_time:.2f} seconds.")
+        return tsne_result
+
+    print("🚀 Running CPU t-SNE (scikit-learn)...")
+    from sklearn.manifold import TSNE as SKTSNE
+
+    tsne = SKTSNE(
         n_components=output_dim,
         perplexity=perplexity,
         n_iter=n_iter,
         verbose=1,
-        method="barnes_hut",
-        num_workers=16
+        method="barnes_hut"
     )
-    tsne_result_gpu = tsne.fit_transform(embeddings_gpu)
-
-    tsne_result = cp.asnumpy(tsne_result_gpu)
+    tsne_result = tsne.fit_transform(embeddings)
     print(f"✅ t-SNE completed in {time.time() - start_time:.2f} seconds.")
     return tsne_result
 
@@ -288,19 +359,32 @@ def generate_tsne_from_lmdb(batch_size=512, output_dim=2, perplexity=30, device_
 # ----------------------------- COMPUTE UMAP -----------------------------
 
 def compute_umap(embeddings, output_dim=2, n_neighbors=15, min_dist=0.1):
-    print("🚀 Running cuML UMAP...")
     start_time = time.time()
-    embeddings_gpu = cp.asarray(embeddings)
+    
+    if _HAS_CUML and UMAP is not None and cp is not None:
+        print("🚀 Running cuML UMAP...")
+        embeddings_gpu = cp.asarray(embeddings)
+        reducer = UMAP(
+            n_components=output_dim,
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            verbose=True,
+        )
+        umap_result_gpu = reducer.fit_transform(embeddings_gpu)
+        umap_result = cp.asnumpy(umap_result_gpu)
+        print(f"✅ UMAP completed in {time.time() - start_time:.2f} seconds.")
+        return umap_result
 
-    reducer = UMAP(
+    print("🚀 Running CPU UMAP (umap-learn)...")
+    from umap import UMAP as CPUUMAP
+
+    reducer = CPUUMAP(
         n_components=output_dim,
         n_neighbors=n_neighbors,
         min_dist=min_dist,
-        verbose=True
+        verbose=True,
     )
-    umap_result_gpu = reducer.fit_transform(embeddings_gpu)
-    umap_result = cp.asnumpy(umap_result_gpu)
-
+    umap_result = reducer.fit_transform(embeddings)
     print(f"✅ UMAP completed in {time.time() - start_time:.2f} seconds.")
     return umap_result
 
@@ -317,7 +401,7 @@ def generate_umap_from_lmdb(batch_size=512, output_dim=2, device_str="cuda", lmd
 
 
 # ----------------------------- STATIC FILES -----------------------------
-app.mount("/api/output", StaticFiles(directory="output"), name="output")
+app.mount("/output", StaticFiles(directory="output"), name="output")
 
 # ----------------------------- ROOT -----------------------------
 @app.get("/")
@@ -543,7 +627,7 @@ async def make_reduction(method: str, model_name: str = "resnet50"):
         output_dir = "./output"
         sprite_path = f"{output_dir}/sprite_sheet.png"
         metadata_path = f"{output_dir}/{method}_{model_name}_metadata.json"
-
+    
         if os.path.exists(sprite_path) and os.path.exists(metadata_path) and os.path.getsize(sprite_path) > 0:
             with open(metadata_path, "r") as f:
                 json_data = json.load(f)
@@ -611,7 +695,62 @@ async def make_reduction(method: str, model_name: str = "resnet50"):
 class TSNESubsetRequest(BaseModel):
     image_ids: List[str]
 
-# ----------------------------- MAKE T-SNE SUBSET -----------------------------
+# ----------------------------- EXTRACT EMBEDDINGS FROM SUBSET -----------------------------
+def extract_embeddings_from_subset(model, device, image_ids, batch_size=512):
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    all_embeddings = []
+    all_metadata = []
+
+    # Get documents for the subset of image_ids
+    documents = [doc for doc in db_get_all_documents() if doc["image_id"] in image_ids]
+    print(f"✅ Processing {len(documents)} documents for subset.")
+
+    for batch_start in tqdm(range(0, len(documents), batch_size), desc="Processing subset batches"):
+        batch_docs = documents[batch_start: batch_start + batch_size]
+        image_tensors, metadata = process_lmdb_documents(batch_docs, transform)
+
+        if image_tensors:
+            batch_tensor = torch.stack(image_tensors)
+            batch_tensor = batch_tensor.to(device, non_blocking=True)
+
+            with torch.cuda.amp.autocast():
+                with torch.no_grad():
+                    feats = model(batch_tensor)
+            batch_embeddings = feats.cpu().numpy()
+            for emb, meta in zip(batch_embeddings, metadata):
+                all_embeddings.append(emb)
+                all_metadata.append(meta)
+
+            torch.cuda.empty_cache()
+
+    if not all_embeddings:
+        raise Exception("No valid images found in subset.")
+
+    embeddings = np.vstack(all_embeddings)
+    print(f"✅ Extracted embeddings shape: {embeddings.shape}")
+    return embeddings, all_metadata
+
+# ----------------------------- GENERATE SUBSET REDUCTION -----------------------------
+def generate_subset_reduction(method: str, image_ids: List[str], model_name: str = "resnet50"):
+    device = torch.device("cuda")
+    print(f"Using device: {device}")
+
+    model = initialize_model(device, model_name)
+    embeddings, metadata = extract_embeddings_from_subset(model, device, image_ids)
+
+    if method == "tsne":
+        result = compute_tsne(embeddings)
+    else:  # umap
+        result = compute_umap(embeddings)
+
+    return result, metadata
+
+# ----------------------------- MAKE REDUCTION SUBSET -----------------------------
 @app.post("/api/make_reduction_subset/{method}/{model_name}")
 async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_name: str = "resnet50"):
     """
@@ -626,23 +765,46 @@ async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_n
         if not image_ids:
             raise HTTPException(status_code=400, detail="No image_ids provided.")
 
-        metadata_path = f"./output/{method}_{model_name}_metadata.json"
-        sprite_path = f"/output/sprite_sheet.png"
+        print(f"🔄 Processing subset reduction: {method} with {model_name}")
+        print(f"📊 Number of selected images: {len(image_ids)}")
 
-        if not os.path.exists(metadata_path):
-            raise HTTPException(status_code=404, detail=f"{method.upper()} metadata not found.")
+        # Generate embeddings and reduction for subset
+        result_coords, metadata = generate_subset_reduction(method, image_ids, model_name)
 
-        with open(metadata_path, "r") as file:
-            full_metadata = json.load(file)
+        print(f"✅ Generated coordinates shape: {result_coords.shape}")
+        print(f"✅ Metadata count: {len(metadata)}")
 
-        filtered_metadata = [item for item in full_metadata if item["image_id"] in image_ids]
+        # Create output directory if it doesn't exist
+        output_dir = "./output"
+        os.makedirs(output_dir, exist_ok=True)
 
-        if not filtered_metadata:
-            raise HTTPException(status_code=404, detail=f"No matching image_ids found in {method.upper()} metadata.")
+        # Generate sprite sheet and metadata with unique names
+        sprite_path = f"{output_dir}/sprite_sheet_subset.png"
+        metadata_path = f"{output_dir}/{method}_{model_name}_subset_metadata.json"
 
-        sprite_dim = int(np.ceil(np.sqrt(len(full_metadata))))
+        result = create_sprite_sheet(
+            output_sprite=sprite_path,
+            output_json=metadata_path,
+            reduction_method=method,
+            coordinates=result_coords,
+            metadata=metadata
+        )
+
+        if not result:
+            raise HTTPException(status_code=500, detail=f"Failed to generate {method.upper()} sprite sheet")
+
+        # Read the processed items from the JSON file
+        with open(metadata_path, "r") as f:
+            processed_items = json.load(f)
+
+        # Calculate sprite sheet dimensions
+        num_images = len(processed_items)
+        sprite_dim = int(np.ceil(np.sqrt(num_images)))
         sprite_width = 32
         sprite_height = 32
+
+        print(f"✅ Generated sprite sheet: {sprite_dim}x{sprite_dim} grid")
+        print(f"✅ Processed {len(processed_items)} items with sprite coordinates")
 
         return JSONResponse({
             "spritePath": {
@@ -652,10 +814,11 @@ async def make_reduction_subset(method: str, payload: TSNESubsetRequest, model_n
                 "height": sprite_dim * sprite_height,
                 "sprite_width": sprite_width,
                 "sprite_height": sprite_height,
-                "url": sprite_path
+                "url": "/output/sprite_sheet_subset.png"
             },
-            "itemsPath": filtered_metadata
+            "itemsPath": processed_items
         })
 
     except Exception as e:
+        print(f"❌ Error in subset reduction: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

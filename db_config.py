@@ -59,7 +59,7 @@ env = lmdb.open(DB_FOLDER, map_size=DB_MAP_SIZE, subdir=True, max_dbs=2)
 image_db = env.open_db(b"images")
 metadata_db = env.open_db(b"metadata")
 
-print("✅ Connected to LMDB successfully!")
-print(f"🔍 LMDB Folder: {DB_FOLDER}")
+print("Connected to LMDB successfully!")
+print(f"LMDB Folder: {DB_FOLDER}")
 
 
